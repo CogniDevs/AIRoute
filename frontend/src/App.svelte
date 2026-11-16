@@ -9,6 +9,7 @@
     RemoveCustomProvider
   } from '../wailsjs/go/main/App.js';
   import { domain } from '../wailsjs/go/models';
+  import logoImg from './assets/images/logo-universal.png';
 
   type Tab = 'connect' | 'servers' | 'settings';
   let activeTab: Tab = 'connect';
@@ -138,9 +139,7 @@
   <!-- Minimalist Header -->
   <header class="navbar">
     <div class="brand">
-      <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-      </svg>
+      <img class="brand-logo" src={logoImg} alt="AIRoute Logo" />
       <div class="brand-meta">
         <span class="brand-title">AIRoute</span>
         <span class="brand-badge">PRO</span>
@@ -410,10 +409,11 @@
     gap: 10px;
   }
 
-  .brand-icon {
-    width: 22px;
-    height: 22px;
-    color: var(--primary);
+  .brand-logo {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    object-fit: contain;
   }
 
   .brand-meta {

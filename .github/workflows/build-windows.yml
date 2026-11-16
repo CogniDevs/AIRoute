@@ -34,6 +34,11 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
         shell: pwsh
 
+      - name: Setup NSIS
+        run: |
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: pwsh
+
       - name: Install Frontend Dependencies
         run: |
           cd frontend
@@ -49,9 +54,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release-dist
           Copy-Item -Path "build\bin\airoute.exe" -Destination "release-dist\AIRoute_Windows_Portable.exe" -Force
-          $installer = Get-ChildItem -Path "build\bin" -Filter "*installer.exe" | Select-Object -First 1
+          $installer = Get-ChildItem -Path "build\bin" -Filter "*installer*.exe" | Select-Object -First 1
           if ($installer) {
             Copy-Item -Path $installer.FullName -Destination "release-dist\AIRoute_Windows_Installer.exe" -Force
+            Write-Host "Found installer: $($installer.FullName)"
+          } else {
+            Write-Error "NSIS installer was not generated in build/bin!"
+            exit 1
           }
         shell: pwsh
 
@@ -65,7 +74,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v0.1.0' }}
           files: release-dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
