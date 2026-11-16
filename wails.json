@@ -7,7 +7,14 @@
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
   "author": {
-    "name": "MiruProd",
-    "email": "225598651+MiruProd@users.noreply.github.com"
+    "name": "CogniDevs",
+    "email": "contact@cognidevs.com"
+  },
+  "info": {
+    "companyName": "CogniDevs",
+    "productName": "AIRoute",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright (c) 2026 CogniDevs",
+    "comments": "Universal Smart DNS & Hosts Router for AI workloads"
   }
 }

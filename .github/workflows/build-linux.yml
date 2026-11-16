@@ -1,0 +1,100 @@
+name: Build Linux
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Build Linux Binary & Deb Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          check-latest: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux GTK & WebKit Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install Frontend Dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Build Application for Linux
+        run: |
+          wails build -platform linux/amd64
+
+      - name: Package Linux Artifacts (.deb and .tar.gz)
+        run: |
+          mkdir -p release-dist
+
+          # 1. Archive tar.gz
+          mkdir -p package_linux/bin package_linux/share/applications package_linux/share/icons/hicolor/256x256/apps
+          cp build/bin/airoute package_linux/bin/airoute
+          cp build/linux/airoute.desktop package_linux/share/applications/airoute.desktop
+          cp build/appicon.png package_linux/share/icons/hicolor/256x256/apps/airoute.png
+          tar -czvf release-dist/AIRoute_Linux_amd64.tar.gz -C package_linux .
+
+          # 2. Native Debian/Ubuntu .deb package
+          mkdir -p pkg_deb/DEBIAN
+          mkdir -p pkg_deb/usr/bin
+          mkdir -p pkg_deb/usr/share/applications
+          mkdir -p pkg_deb/usr/share/icons/hicolor/256x256/apps
+
+          cp build/bin/airoute pkg_deb/usr/bin/airoute
+          chmod 755 pkg_deb/usr/bin/airoute
+          cp build/linux/airoute.desktop pkg_deb/usr/share/applications/airoute.desktop
+          cp build/appicon.png pkg_deb/usr/share/icons/hicolor/256x256/apps/airoute.png
+
+          cat <<EOF > pkg_deb/DEBIAN/control
+          Package: airoute
+          Version: 0.1.0
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Maintainer: CogniDevs <contact@cognidevs.com>
+          Depends: libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
+          Description: Universal Smart DNS and Hosts Router for AI Models
+           AIRoute provides direct zero-overhead access to Google Gemini, Claude AI,
+           ChatGPT, Antigravity IDE, and Cursor via Smart DNS and hosts routing.
+          EOF
+          chmod 644 pkg_deb/DEBIAN/control
+
+          dpkg-deb --build pkg_deb release-dist/AIRoute_0.1.0_amd64.deb
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIRoute_Linux
+          path: release-dist/*
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release-dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

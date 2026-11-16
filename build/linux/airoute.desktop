@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=AIRoute
+Comment=Universal Smart DNS & Hosts Router for AI Models
+Exec=/usr/bin/airoute
+Icon=airoute
+Terminal=false
+Type=Application
+Categories=Network;Development;Utility;
+StartupWMClass=airoute
