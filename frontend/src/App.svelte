@@ -10,8 +10,8 @@
   } from '../wailsjs/go/main/App.js';
   import { domain } from '../wailsjs/go/models';
 
-  type Tab = 'home' | 'servers' | 'custom';
-  let activeTab: Tab = 'home';
+  type Tab = 'connect' | 'servers' | 'settings';
+  let activeTab: Tab = 'connect';
 
   let status: domain.RouteState = new domain.RouteState({
     is_enabled: false,
@@ -20,7 +20,7 @@
     active_provider: '',
     active_ip: '',
     latency_ms: 0,
-    message: 'Загрузка статуса...'
+    message: 'Инициализация...'
   });
 
   let selectedTarget: string = 'all';
@@ -86,18 +86,18 @@
   }
 
   async function handleAddCustom() {
-    if (!newName || !newEndpoint) {
-      errorMessage = 'Укажите название и адрес (DoH URL или IP)';
+    if (!newName.trim() || !newEndpoint.trim()) {
+      errorMessage = 'Введите название и адрес сервера';
       return;
     }
     try {
       const p = new domain.Provider({
         id: 'custom-' + Date.now(),
-        name: newName,
+        name: newName.trim(),
         kind: newEndpoint.startsWith('http') ? 'doh' : 'udp',
-        endpoint: newEndpoint,
-        fallback_ips: newIP ? [newIP] : [],
-        gateways: newIP ? [newIP] : [],
+        endpoint: newEndpoint.trim(),
+        fallback_ips: newIP.trim() ? [newIP.trim()] : [],
+        gateways: newIP.trim() ? [newIP.trim()] : [],
         enabled: true,
         is_custom: true
       });
@@ -121,184 +121,197 @@
     }
   }
 
-  function getLatencyBadgeClass(ms: number): string {
-    if (ms <= 0 || ms > 900) return 'badge-fail';
-    if (ms < 80) return 'badge-fast';
-    if (ms < 180) return 'badge-med';
-    return 'badge-slow';
+  function getTargetLabel(target: string): string {
+    switch (target) {
+      case 'all': return 'Все нейросети (Gemini, Claude, ChatGPT, Antigravity, Cursor)';
+      case 'gemini': return 'Google Gemini & AI Studio';
+      case 'claude': return 'Claude AI & Anthropic';
+      case 'chatgpt': return 'ChatGPT & OpenAI';
+      case 'antigravity': return 'Antigravity IDE (CloudCode)';
+      case 'cursor': return 'Cursor IDE';
+      default: return 'Все нейросети';
+    }
   }
 </script>
 
-<div class="window">
-  <!-- Top Title Bar -->
-  <header class="header">
+<div class="app-layout">
+  <!-- Minimalist Header -->
+  <header class="navbar">
     <div class="brand">
-      <span class="logo-icon">⚡</span>
-      <div class="brand-text">
-        <span class="app-name">AIRoute</span>
-        <span class="app-sub">AI Smart DNS & Hosts Optimizer</span>
+      <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+      </svg>
+      <div class="brand-meta">
+        <span class="brand-title">AIRoute</span>
+        <span class="brand-badge">PRO</span>
       </div>
     </div>
 
-    <nav class="nav">
-      <button class="nav-btn" class:active={activeTab === 'home'} on:click={() => activeTab = 'home'}>Главная</button>
-      <button class="nav-btn" class:active={activeTab === 'servers'} on:click={() => activeTab = 'servers'}>Серверы ({providers.length})</button>
-      <button class="nav-btn" class:active={activeTab === 'custom'} on:click={() => activeTab = 'custom'}>+ Добавить DNS</button>
+    <nav class="nav-links">
+      <button class="nav-item" class:active={activeTab === 'connect'} on:click={() => activeTab = 'connect'}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+          <line x1="12" y1="2" x2="12" y2="12"></line>
+        </svg>
+        <span>Подключение</span>
+      </button>
+
+      <button class="nav-item" class:active={activeTab === 'servers'} on:click={() => activeTab = 'servers'}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+          <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+          <line x1="6" y1="6" x2="6.01" y2="6"></line>
+          <line x1="6" y1="18" x2="6.01" y2="18"></line>
+        </svg>
+        <span>Серверы</span>
+        <span class="count-pill">{providers.length}</span>
+      </button>
+
+      <button class="nav-item" class:active={activeTab === 'settings'} on:click={() => activeTab = 'settings'}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>Настройки</span>
+      </button>
     </nav>
   </header>
 
-  <!-- Error banner if any -->
+  <!-- Notification Bar -->
   {#if errorMessage}
-    <div class="error-banner">
-      <span>⚠️ {errorMessage}</span>
-      <button class="close-err" on:click={() => errorMessage = ''}>✕</button>
+    <div class="notification-bar error">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <span>{errorMessage}</span>
+      <button class="icon-close" on:click={() => errorMessage = ''}>✕</button>
     </div>
   {/if}
 
-  <!-- Content Views -->
-  <main class="content">
-    {#if activeTab === 'home'}
-      <div class="home-view">
-        <!-- Big Toggle Switch -->
-        <div class="toggle-card">
+  <!-- Viewport Container -->
+  <main class="view-body">
+    <!-- 1. Connection View (Minimal, Beautiful) -->
+    {#if activeTab === 'connect'}
+      <div class="connect-view">
+        <!-- Power Button -->
+        <div class="power-container">
           <button
-            class="power-btn"
+            class="main-toggle"
             class:active={status.is_enabled}
             disabled={isToggling}
             on:click={handleToggle}
           >
-            <div class="power-icon">⏻</div>
-            <div class="power-label">
+            <div class="toggle-glow"></div>
+            <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+              <line x1="12" y1="2" x2="12" y2="12"></line>
+            </svg>
+            <span class="toggle-state">
               {#if isToggling}
                 Применение...
               {:else if status.is_enabled}
-                МАРШРУТИЗАЦИЯ ВКЛЮЧЕНА
+                ПОДКЛЮЧЕНО
               {:else}
-                ВКЛЮЧИТЬ AI ROUTE
+                ПОДКЛЮЧИТЬ
               {/if}
-            </div>
-            <div class="power-sub">
-              {status.is_enabled ? 'Все запросы идут через чистый шлюз' : 'Нажмите для мгновенного прямого доступа'}
-            </div>
+            </span>
           </button>
         </div>
 
-        <!-- Target Selector & Info -->
-        <div class="controls-row">
-          <div class="form-group">
-            <label for="target-select">Маршрутизировать для:</label>
-            <select id="target-select" bind:value={selectedTarget} disabled={status.is_enabled}>
-              <option value="all">🌟 Все нейросети сразу (Gemini, Claude, ChatGPT, Antigravity, Cursor)</option>
-              <option value="gemini">💎 Только Google Gemini & AI Studio</option>
-              <option value="claude">🧠 Только Claude AI & Anthropic</option>
-              <option value="chatgpt">⚡ Только ChatGPT & OpenAI</option>
-              <option value="antigravity">🛸 Только Antigravity IDE (CloudCode)</option>
-              <option value="cursor">💻 Только Cursor IDE</option>
-            </select>
-          </div>
-
-          <div class="form-group">
-            <label for="provider-select">Основной провайдер:</label>
-            <select id="provider-select" bind:value={selectedProviderId} disabled={status.is_enabled}>
-              {#each providers as prov}
-                <option value={prov.id}>{prov.name}</option>
-              {/each}
-            </select>
+        <!-- Connection Badge -->
+        <div class="connection-status">
+          <span class="status-dot" class:online={status.is_enabled}></span>
+          <div class="status-text">
+            {#if status.is_enabled}
+              <div class="status-main">Маршрутизация активна через {status.active_provider || 'Smart DNS'}</div>
+              <div class="status-sub">Шлюз: {status.active_ip || '194.87.196.13'} • Режим: Hosts (Zero-RAM)</div>
+            {:else}
+              <div class="status-main">Прямое подключение к сети</div>
+              <div class="status-sub">Нажмите кнопку выше для мгновенного обхода ограничений</div>
+            {/if}
           </div>
         </div>
 
-        <!-- Status Summary Bar -->
-        <div class="status-summary">
-          <div class="status-item">
-            <span class="label">Режим:</span>
-            <span class="val">Hosts File (Zero-RAM, без фоновых служб)</span>
+        <!-- Scope Card -->
+        <div class="scope-card">
+          <div class="scope-info">
+            <span class="scope-label">Охват сервисов</span>
+            <span class="scope-val">{getTargetLabel(selectedTarget)}</span>
           </div>
-          <div class="status-item">
-            <span class="label">Активный IP:</span>
-            <span class="val">{status.active_ip || '—'}</span>
-          </div>
-          <div class="status-item">
-            <span class="label">Провайдер:</span>
-            <span class="val">{status.active_provider || 'Стандартный DNS провайдера'}</span>
-          </div>
-        </div>
-
-        <!-- Ecosystem Grid -->
-        <div class="ecosystem-grid">
-          <div class="eco-card" class:active={status.is_enabled}>
-            <div class="eco-header">
-              <span class="eco-name">Google Gemini</span>
-              <span class="eco-dot"></span>
-            </div>
-            <span class="eco-sub">gemini.google.com, aistudio</span>
-          </div>
-          <div class="eco-card" class:active={status.is_enabled}>
-            <div class="eco-header">
-              <span class="eco-name">Claude AI</span>
-              <span class="eco-dot"></span>
-            </div>
-            <span class="eco-sub">claude.ai, api.anthropic.com</span>
-          </div>
-          <div class="eco-card" class:active={status.is_enabled}>
-            <div class="eco-header">
-              <span class="eco-name">ChatGPT & OpenAI</span>
-              <span class="eco-dot"></span>
-            </div>
-            <span class="eco-sub">chatgpt.com, api.openai.com</span>
-          </div>
-          <div class="eco-card" class:active={status.is_enabled}>
-            <div class="eco-header">
-              <span class="eco-name">Antigravity IDE</span>
-              <span class="eco-dot"></span>
-            </div>
-            <span class="eco-sub">cloudcode-pa, aicode.googleapis</span>
-          </div>
+          <button class="scope-btn" on:click={() => activeTab = 'settings'}>
+            Изменить
+          </button>
         </div>
       </div>
 
+    <!-- 2. Servers View -->
     {:else if activeTab === 'servers'}
       <div class="servers-view">
-        <div class="servers-toolbar">
-          <span class="toolbar-title">Проверенные Smart DNS и DoH шлюзы</span>
-          <button class="test-btn" disabled={isTesting} on:click={handleTestAll}>
-            {isTesting ? '🔄 Тестирование TLS и пинга...' : '⚡ Замерить пинг всех серверов'}
+        <div class="view-toolbar">
+          <div class="toolbar-info">
+            <h2>Доступные шлюзы</h2>
+            <p>Пул проверенных Smart DNS и DoH серверов</p>
+          </div>
+          <button class="btn-primary" disabled={isTesting} on:click={handleTestAll}>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" class:rotating={isTesting}>
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <polyline points="1 20 1 14 7 14"></polyline>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            <span>{isTesting ? 'Проверка...' : 'Замерить пинг'}</span>
           </button>
         </div>
 
-        <div class="server-list">
+        <div class="provider-list">
           {#each providers as prov}
-            <div class="server-card">
-              <div class="server-main">
-                <div class="server-title-row">
-                  <span class="server-name">{prov.name}</span>
-                  <span class="server-kind">{prov.kind.toUpperCase()}</span>
+            <div class="provider-row" class:is-selected={selectedProviderId === prov.id}>
+              <div class="provider-lead">
+                <div class="provider-title">
+                  <span class="provider-name">{prov.name}</span>
+                  <span class="tag-kind">{prov.kind.toUpperCase()}</span>
                   {#if prov.is_custom}
-                    <span class="custom-badge">Пользовательский</span>
+                    <span class="tag-custom">Свой</span>
                   {/if}
                 </div>
-                <div class="server-endpoint">{prov.endpoint}</div>
+                <span class="provider-endpoint">{prov.endpoint}</span>
                 {#if prov.fallback_ips && prov.fallback_ips.length > 0}
-                  <div class="server-ips">IP: {prov.fallback_ips.join(', ')}</div>
+                  <span class="provider-ip-hint">IP: {prov.fallback_ips.join(', ')}</span>
                 {/if}
               </div>
 
-              <div class="server-actions">
+              <div class="provider-meta">
                 {#if probeResults.some(r => r.provider_id === prov.id)}
-                  {@const pResult = probeResults.find(r => r.provider_id === prov.id)}
-                  <span class="ping-badge {getLatencyBadgeClass(pResult ? pResult.latency_ms : 0)}">
-                    {pResult && pResult.is_clean ? `${pResult.latency_ms} ms` : 'Ошибка'}
+                  {@const res = probeResults.find(r => r.provider_id === prov.id)}
+                  <span class="latency-badge" class:fast={res && res.is_clean && res.latency_ms < 80} class:med={res && res.is_clean && res.latency_ms >= 80} class:bad={!res || !res.is_clean}>
+                    {res && res.is_clean ? `${res.latency_ms} ms` : 'Ошибка'}
                   </span>
                 {/if}
+
                 <button
-                  class="select-btn"
-                  class:selected={selectedProviderId === prov.id}
+                  class="btn-select"
+                  class:active={selectedProviderId === prov.id}
                   disabled={status.is_enabled}
                   on:click={() => selectedProviderId = prov.id}
                 >
-                  {selectedProviderId === prov.id ? '✓ Выбран' : 'Выбрать'}
+                  {#if selectedProviderId === prov.id}
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                    <span>Выбран</span>
+                  {:else}
+                    <span>Выбрать</span>
+                  {/if}
                 </button>
+
                 {#if prov.is_custom}
-                  <button class="del-btn" on:click={() => handleRemove(prov.id)}>🗑</button>
+                  <button class="btn-del" on:click={() => handleRemove(prov.id)} title="Удалить">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="3 6 5 6 21 6"></polyline>
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                  </button>
                 {/if}
               </div>
             </div>
@@ -306,30 +319,66 @@
         </div>
       </div>
 
-    {:else if activeTab === 'custom'}
-      <div class="custom-view">
-        <h3>Добавить пользовательский Smart DNS / DoH</h3>
-        <p class="custom-hint">
-          Вы можете добавить любой приватный DoH резолвер или IP-шлюз. Он сохранится в настройках и будет участвовать в бенчмарках.
-        </p>
+    <!-- 3. Settings View -->
+    {:else if activeTab === 'settings'}
+      <div class="settings-view">
+        <div class="view-toolbar">
+          <div class="toolbar-info">
+            <h2>Параметры маршрутизации</h2>
+            <p>Тонкая настройка работы Smart DNS и шлюзов</p>
+          </div>
+        </div>
 
-        <div class="custom-form">
-          <div class="form-group">
-            <label for="custom-name">Название:</label>
-            <input id="custom-name" type="text" placeholder="Мой DoH Шлюз" bind:value={newName} />
+        <div class="settings-form">
+          <!-- Target scope -->
+          <div class="setting-card">
+            <div class="setting-desc">
+              <span class="setting-title">Целевые сервисы</span>
+              <span class="setting-sub">Выберите, для каких нейросетей перенаправлять запросы</span>
+            </div>
+            <select bind:value={selectedTarget} disabled={status.is_enabled}>
+              <option value="all">Все нейросети (Gemini, Claude, ChatGPT, Antigravity, Cursor)</option>
+              <option value="gemini">Google Gemini & AI Studio</option>
+              <option value="claude">Claude AI & Anthropic</option>
+              <option value="chatgpt">ChatGPT & OpenAI</option>
+              <option value="antigravity">Antigravity IDE (CloudCode)</option>
+              <option value="cursor">Cursor IDE</option>
+            </select>
           </div>
 
-          <div class="form-group">
-            <label for="custom-endpoint">Адрес (DoH URL или IP):</label>
-            <input id="custom-endpoint" type="text" placeholder="https://example.com/dns-query" bind:value={newEndpoint} />
+          <!-- DNS Provider -->
+          <div class="setting-card">
+            <div class="setting-desc">
+              <span class="setting-title">Предпочтительный сервер</span>
+              <span class="setting-sub">Шлюз по умолчанию при включении</span>
+            </div>
+            <select bind:value={selectedProviderId} disabled={status.is_enabled}>
+              {#each providers as prov}
+                <option value={prov.id}>{prov.name}</option>
+              {/each}
+            </select>
           </div>
 
-          <div class="form-group">
-            <label for="custom-ip">Резервный IP шлюза (опционально):</label>
-            <input id="custom-ip" type="text" placeholder="192.168.1.1" bind:value={newIP} />
-          </div>
+          <!-- Add Custom Server Section -->
+          <div class="setting-card form-box">
+            <div class="setting-desc">
+              <span class="setting-title">Добавить свой DNS шлюз</span>
+              <span class="setting-sub">Поддержка пользовательских DoH (HTTPS) или IP резолверов</span>
+            </div>
 
-          <button class="add-btn" on:click={handleAddCustom}>Сохранить DNS</button>
+            <div class="add-grid">
+              <input type="text" placeholder="Название (напр. Мой DoH)" bind:value={newName} />
+              <input type="text" placeholder="Адрес (https://.../dns-query или IP)" bind:value={newEndpoint} />
+              <input type="text" placeholder="Резервный IP (опционально)" bind:value={newIP} />
+              <button class="btn-primary" on:click={handleAddCustom}>
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+                <span>Добавить</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     {/if}
@@ -337,19 +386,21 @@
 </div>
 
 <style>
-  .window {
+  .app-layout {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    background-color: var(--bg-main);
+    width: 100%;
+    overflow: hidden;
   }
 
-  .header {
+  /* Header */
+  .navbar {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 12px 20px;
-    background-color: var(--bg-card);
+    padding: 12px 24px;
+    background-color: var(--bg-surface);
     border-bottom: 1px solid var(--border);
   }
 
@@ -359,408 +410,458 @@
     gap: 10px;
   }
 
-  .logo-icon {
-    font-size: 24px;
-  }
-
-  .brand-text {
-    display: flex;
-    flex-direction: column;
-    text-align: left;
-  }
-
-  .app-name {
-    font-size: 18px;
-    font-weight: 700;
+  .brand-icon {
+    width: 22px;
+    height: 22px;
     color: var(--primary);
-    letter-spacing: 0.5px;
   }
 
-  .app-sub {
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-
-  .nav {
+  .brand-meta {
     display: flex;
+    align-items: center;
     gap: 8px;
   }
 
-  .nav-btn {
+  .brand-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.3px;
+  }
+
+  .brand-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    background-color: var(--primary-glow);
+    color: var(--primary);
+    border-radius: 4px;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 6px;
+    background-color: var(--bg-app);
+    padding: 4px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+
+  .nav-item {
     padding: 6px 14px;
     font-size: 13px;
-    background-color: transparent;
-    border: 1px solid transparent;
+    color: var(--text-secondary);
+    border-radius: 6px;
+  }
+
+  .nav-item:hover {
+    color: var(--text-primary);
+  }
+
+  .nav-item.active {
+    background-color: var(--bg-surface);
+    color: var(--primary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+
+  .count-pill {
+    font-size: 11px;
+    background: var(--bg-card);
+    padding: 1px 6px;
+    border-radius: 10px;
     color: var(--text-muted);
   }
 
-  .nav-btn.active {
-    background-color: var(--bg-card-hover);
-    border-color: var(--border);
-    color: var(--primary);
-    font-weight: 600;
-  }
-
-  .error-banner {
-    background-color: rgba(248, 81, 73, 0.15);
-    border: 1px solid var(--accent-red);
-    color: #ff7b72;
-    padding: 8px 16px;
+  /* Notifications */
+  .notification-bar {
+    padding: 10px 20px;
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 10px;
     font-size: 13px;
   }
 
-  .close-err {
-    background: none;
-    border: none;
+  .notification-bar.error {
+    background-color: var(--danger-bg);
+    color: #fca5a5;
+    border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+  }
+
+  .icon-close {
+    margin-left: auto;
     color: inherit;
     font-size: 14px;
   }
 
-  .content {
+  /* Body */
+  .view-body {
     flex: 1;
     overflow-y: auto;
-    padding: 20px;
+    overflow-x: hidden;
+    padding: 24px;
   }
 
-  /* Home View */
-  .home-view {
+  /* Connect View */
+  .connect-view {
     display: flex;
     flex-direction: column;
-    gap: 20px;
-    max-width: 680px;
-    margin: 0 auto;
+    align-items: center;
+    justify-content: center;
+    max-width: 520px;
+    margin: 20px auto 0;
+    gap: 28px;
   }
 
-  .toggle-card {
+  .power-container {
+    position: relative;
     display: flex;
     justify-content: center;
-    padding: 10px 0;
+    align-items: center;
   }
 
-  .power-btn {
-    width: 240px;
-    height: 240px;
+  .main-toggle {
+    position: relative;
+    width: 210px;
+    height: 210px;
     border-radius: 50%;
-    background: linear-gradient(145deg, #161b22, #1c2129);
+    background: radial-gradient(circle at 30% 30%, #1e293b, #0f172a);
     border: 3px solid var(--border);
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    cursor: pointer;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    gap: 12px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
-  .power-btn:hover:not(:disabled) {
+  .main-toggle:hover:not(:disabled) {
     transform: scale(1.02);
     border-color: var(--primary);
   }
 
-  .power-btn.active {
-    border-color: var(--accent-green);
-    box-shadow: 0 0 40px var(--accent-green-glow);
-    background: linear-gradient(145deg, #102618, #161b22);
+  .main-toggle.active {
+    border-color: var(--success);
+    background: radial-gradient(circle at 30% 30%, #064e3b, #022c22);
+    box-shadow: 0 0 50px var(--success-glow);
   }
 
-  .power-icon {
-    font-size: 52px;
+  .toggle-icon {
+    width: 44px;
+    height: 44px;
     color: var(--text-muted);
     transition: color 0.3s;
   }
 
-  .power-btn.active .power-icon {
-    color: #3fb950;
+  .main-toggle.active .toggle-icon {
+    color: #34d399;
   }
 
-  .power-label {
-    font-size: 14px;
+  .toggle-state {
+    font-size: 13px;
     font-weight: 700;
-    letter-spacing: 0.5px;
+    letter-spacing: 1px;
+    color: var(--text-secondary);
   }
 
-  .power-btn.active .power-label {
-    color: #3fb950;
+  .main-toggle.active .toggle-state {
+    color: #34d399;
   }
 
-  .power-sub {
-    font-size: 11px;
-    color: var(--text-muted);
-    max-width: 170px;
-    text-align: center;
+  .connection-status {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border);
+    padding: 14px 20px;
+    border-radius: 12px;
+    width: 100%;
   }
 
-  .controls-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
+  .status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--text-muted);
+    flex-shrink: 0;
   }
 
-  .form-group {
+  .status-dot.online {
+    background-color: var(--success);
+    box-shadow: 0 0 10px var(--success);
+  }
+
+  .status-text {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 2px;
     text-align: left;
   }
 
-  .form-group label {
-    font-size: 12px;
-    color: var(--text-muted);
+  .status-main {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
-  .form-group select, .form-group input {
-    padding: 8px 12px;
+  .status-sub {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .scope-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    padding: 12px 18px;
+    border-radius: 10px;
+    width: 100%;
+  }
+
+  .scope-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    text-align: left;
+    max-width: 360px;
+  }
+
+  .scope-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+
+  .scope-val {
+    font-size: 13px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .scope-btn {
+    padding: 6px 14px;
+    font-size: 12px;
+    color: var(--primary);
+    background-color: var(--primary-glow);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+  }
+
+  /* Common Toolbar */
+  .view-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+
+  .toolbar-info h2 {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    text-align: left;
+  }
+
+  .toolbar-info p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-align: left;
+  }
+
+  .btn-primary {
+    background-color: var(--primary);
+    color: #ffffff;
+    padding: 9px 18px;
     font-size: 13px;
   }
 
-  .status-summary {
-    display: flex;
-    justify-content: space-between;
-    background-color: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px 16px;
-    font-size: 12px;
+  .btn-primary:hover:not(:disabled) {
+    background-color: var(--primary-hover);
   }
 
-  .status-item {
+  .rotating {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    100% { transform: rotate(360deg); }
+  }
+
+  /* Servers List */
+  .servers-view, .settings-view {
+    max-width: 680px;
+    margin: 0 auto;
+  }
+
+  .provider-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .provider-row {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: border-color 0.15s ease;
+  }
+
+  .provider-row.is-selected {
+    border-color: var(--primary);
+    background-color: var(--bg-surface-hover);
+  }
+
+  .provider-lead {
     display: flex;
     flex-direction: column;
     gap: 4px;
     text-align: left;
   }
 
-  .status-item .label {
-    color: var(--text-muted);
-  }
-
-  .status-item .val {
-    font-weight: 600;
-    color: var(--text-main);
-  }
-
-  .ecosystem-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-  }
-
-  .eco-card {
-    background-color: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
-    text-align: left;
-    transition: border-color 0.2s;
-  }
-
-  .eco-card.active {
-    border-color: #3fb950;
-  }
-
-  .eco-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 4px;
-  }
-
-  .eco-name {
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .eco-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background-color: #484f58;
-  }
-
-  .eco-card.active .eco-dot {
-    background-color: #3fb950;
-    box-shadow: 0 0 8px rgba(63, 185, 80, 0.6);
-  }
-
-  .eco-sub {
-    font-size: 10px;
-    color: var(--text-muted);
-    display: block;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* Servers View */
-  .servers-view {
-    max-width: 680px;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .servers-toolbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .toolbar-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-
-  .test-btn {
-    padding: 8px 16px;
-    background-color: var(--primary);
-    color: #0d1117;
-    font-weight: 700;
-    font-size: 13px;
-    border: none;
-  }
-
-  .server-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .server-card {
-    background-color: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    text-align: left;
-  }
-
-  .server-title-row {
+  .provider-title {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 4px;
   }
 
-  .server-name {
-    font-weight: 600;
+  .provider-name {
     font-size: 14px;
+    font-weight: 600;
   }
 
-  .server-kind {
+  .tag-kind {
     font-size: 10px;
-    background-color: var(--border);
-    padding: 2px 6px;
-    border-radius: 4px;
     font-weight: 700;
+    padding: 2px 6px;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
   }
 
-  .custom-badge {
+  .tag-custom {
     font-size: 10px;
-    background-color: rgba(88, 166, 255, 0.2);
-    color: var(--primary);
+    font-weight: 600;
     padding: 2px 6px;
+    background-color: var(--primary-glow);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: var(--primary);
     border-radius: 4px;
   }
 
-  .server-endpoint {
+  .provider-endpoint {
     font-size: 12px;
     color: var(--text-muted);
     font-family: monospace;
   }
 
-  .server-ips {
+  .provider-ip-hint {
     font-size: 11px;
-    color: #6e7681;
-    margin-top: 2px;
+    color: var(--text-muted);
   }
 
-  .server-actions {
+  .provider-meta {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
   }
 
-  .ping-badge {
+  .latency-badge {
     font-size: 12px;
     font-weight: 700;
     padding: 4px 8px;
-    border-radius: 4px;
+    border-radius: 6px;
   }
 
-  .badge-fast {
-    background-color: rgba(46, 160, 67, 0.2);
-    color: #3fb950;
+  .latency-badge.fast {
+    background-color: var(--success-bg);
+    color: var(--success);
   }
 
-  .badge-med {
-    background-color: rgba(210, 153, 34, 0.2);
-    color: #d29922;
+  .latency-badge.med {
+    background-color: var(--warning-bg);
+    color: var(--warning);
   }
 
-  .badge-slow {
-    background-color: rgba(248, 81, 73, 0.2);
-    color: #ff7b72;
+  .latency-badge.bad {
+    background-color: var(--danger-bg);
+    color: var(--danger);
   }
 
-  .badge-fail {
-    background-color: #21262d;
-    color: #8b949e;
-  }
-
-  .select-btn {
-    padding: 6px 12px;
+  .btn-select {
+    padding: 6px 14px;
     font-size: 12px;
-    background-color: var(--bg-card-hover);
-    color: var(--text-main);
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
   }
 
-  .select-btn.selected {
-    background-color: #238636;
-    border-color: #2ea043;
-    font-weight: 600;
+  .btn-select.active {
+    background-color: var(--success-bg);
+    border-color: var(--success);
+    color: var(--success);
   }
 
-  .del-btn {
-    background: none;
-    border: none;
-    padding: 4px;
-    font-size: 14px;
-  }
-
-  /* Custom View */
-  .custom-view {
-    max-width: 500px;
-    margin: 20px auto;
-    text-align: left;
-  }
-
-  .custom-hint {
-    font-size: 13px;
+  .btn-del {
     color: var(--text-muted);
-    margin-bottom: 20px;
-    line-height: 1.5;
+    padding: 6px;
   }
 
-  .custom-form {
+  .btn-del:hover {
+    color: var(--danger);
+  }
+
+  /* Settings Form */
+  .settings-form {
     display: flex;
     flex-direction: column;
     gap: 16px;
   }
 
-  .add-btn {
-    padding: 10px;
-    background-color: var(--primary);
-    color: #0d1117;
-    font-weight: 700;
-    border: none;
-    margin-top: 8px;
+  .setting-card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    text-align: left;
+  }
+
+  .setting-desc {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .setting-title {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .setting-sub {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .add-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .add-grid input:first-child {
+    grid-column: span 2;
   }
 </style>
