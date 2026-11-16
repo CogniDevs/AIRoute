@@ -34,9 +34,9 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
         shell: pwsh
 
-      - name: Setup NSIS
+      - name: Install NSIS
         run: |
-          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          choco install nsis -y
         shell: pwsh
 
       - name: Install Frontend Dependencies
