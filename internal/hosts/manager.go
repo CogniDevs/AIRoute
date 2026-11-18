@@ -40,8 +40,8 @@ func (m *Manager) GetHostsPath() string {
 	return m.hostsPath
 }
 
-// ApplyRoute writes the specified AI target domain mappings using the clean IP.
-func (m *Manager) ApplyRoute(target domain.ServiceTarget, ip string, providerName string) error {
+// ApplyMultiRoute writes target domain mappings with per-service IPs, falling back to defaultIP.
+func (m *Manager) ApplyMultiRoute(target domain.ServiceTarget, serviceIPs map[domain.ServiceTarget]string, defaultIP string, providerName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -52,11 +52,8 @@ func (m *Manager) ApplyRoute(target domain.ServiceTarget, ip string, providerNam
 
 	cleanLines := m.stripSection(lines)
 
-	var domains []string
-	if target == domain.TargetAll {
-		domains = domain.GetAllDomains()
-	} else {
-		domains = domain.TargetDomains[target]
+	if target == "" {
+		target = domain.TargetAll
 	}
 
 	header := fmt.Sprintf("%s: %s (Provider: %s) ===", SectionStartMarker, string(target), providerName)
@@ -64,11 +61,47 @@ func (m *Manager) ApplyRoute(target domain.ServiceTarget, ip string, providerNam
 	newSection = append(newSection, "\n"+header)
 	newSection = append(newSection, "# Managed by AIRoute. Do not edit manually.")
 
-	for _, d := range domains {
-		newSection = append(newSection, fmt.Sprintf("%-16s %s", ip, d))
+	services := []domain.ServiceTarget{
+		domain.TargetGemini,
+		domain.TargetClaude,
+		domain.TargetChatGPT,
+		domain.TargetAntigravity,
+		domain.TargetCursor,
 	}
-	newSection = append(newSection, SectionEndMarker+"\n")
 
+	if target == domain.TargetAll {
+		for _, srv := range services {
+			ip := ""
+			if serviceIPs != nil {
+				ip = serviceIPs[srv]
+			}
+			if ip == "" {
+				ip = defaultIP
+			}
+			if ip == "" {
+				continue
+			}
+			newSection = append(newSection, fmt.Sprintf("# [%s]", srv))
+			for _, d := range domain.TargetDomains[srv] {
+				newSection = append(newSection, fmt.Sprintf("%-16s %s", ip, d))
+			}
+		}
+	} else {
+		ip := ""
+		if serviceIPs != nil {
+			ip = serviceIPs[target]
+		}
+		if ip == "" {
+			ip = defaultIP
+		}
+		if ip != "" {
+			for _, d := range domain.TargetDomains[target] {
+				newSection = append(newSection, fmt.Sprintf("%-16s %s", ip, d))
+			}
+		}
+	}
+
+	newSection = append(newSection, SectionEndMarker+"\n")
 	cleanLines = append(cleanLines, newSection...)
 
 	if err := m.writeLines(cleanLines); err != nil {
@@ -77,6 +110,11 @@ func (m *Manager) ApplyRoute(target domain.ServiceTarget, ip string, providerNam
 
 	_ = FlushDNS()
 	return nil
+}
+
+// ApplyRoute writes the specified AI target domain mappings using a single clean IP.
+func (m *Manager) ApplyRoute(target domain.ServiceTarget, ip string, providerName string) error {
+	return m.ApplyMultiRoute(target, nil, ip, providerName)
 }
 
 // ClearRoute removes the AIRoute section from the hosts file.
@@ -109,13 +147,30 @@ func (m *Manager) GetActiveState() (isActive bool, ip string, target domain.Serv
 		return false, "", "", ""
 	}
 
+	target = domain.TargetAll
 	inSection := false
 	for _, l := range lines {
 		trimmed := strings.TrimSpace(l)
 		if strings.HasPrefix(trimmed, SectionStartMarker) {
 			inSection = true
-			// Parse header
-			if strings.Contains(trimmed, "Provider: ") {
+			// Header format: "# === AIROUTE START: <target> (Provider: <name>) ==="
+			afterMarker := strings.TrimPrefix(trimmed, SectionStartMarker)
+			if strings.HasPrefix(afterMarker, ": ") {
+				rest := strings.TrimPrefix(afterMarker, ": ")
+				if idx := strings.Index(rest, " (Provider: "); idx != -1 {
+					parsedTarget := strings.TrimSpace(rest[:idx])
+					if parsedTarget != "" {
+						target = domain.ServiceTarget(parsedTarget)
+					}
+					provPart := rest[idx+len(" (Provider: "):]
+					provider = strings.TrimSuffix(provPart, ") ===")
+				} else {
+					parsedTarget := strings.TrimSpace(strings.TrimSuffix(rest, " ==="))
+					if parsedTarget != "" {
+						target = domain.ServiceTarget(parsedTarget)
+					}
+				}
+			} else if strings.Contains(trimmed, "Provider: ") {
 				parts := strings.Split(trimmed, "Provider: ")
 				if len(parts) > 1 {
 					provider = strings.TrimSuffix(parts[1], ") ===")
@@ -129,13 +184,15 @@ func (m *Manager) GetActiveState() (isActive bool, ip string, target domain.Serv
 		if inSection && len(trimmed) > 0 && !strings.HasPrefix(trimmed, "#") {
 			fields := strings.Fields(trimmed)
 			if len(fields) >= 2 {
-				ip = fields[0]
+				if ip == "" {
+					ip = fields[0]
+				}
 				isActive = true
 			}
 		}
 	}
 
-	return isActive, ip, domain.TargetAll, provider
+	return isActive, ip, target, provider
 }
 
 func (m *Manager) stripSection(lines []string) []string {

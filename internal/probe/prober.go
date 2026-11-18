@@ -3,7 +3,6 @@ package probe
 import (
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 	"sync"
@@ -43,21 +42,32 @@ func (p *Prober) ProbeIP(ip string, target domain.ServiceTarget) domain.ProbeRes
 		res.IsClean, res.Reason = p.checkChatGPT(ip)
 	case domain.TargetAntigravity:
 		res.IsClean, res.Reason = p.checkAntigravity(ip)
+	case domain.TargetCursor:
+		res.IsClean, res.Reason = p.checkCursor(ip)
 	case domain.TargetAll, "":
-		// Composite check: must pass Gemini & Claude checks
-		okGem, reasonGem := p.checkGemini(ip)
-		if !okGem {
-			res.IsClean = false
-			res.Reason = reasonGem
+		var passed []string
+		if ok, _ := p.checkGemini(ip); ok {
+			passed = append(passed, "Gemini")
+		}
+		if ok, _ := p.checkClaude(ip); ok {
+			passed = append(passed, "Claude")
+		}
+		if ok, _ := p.checkChatGPT(ip); ok {
+			passed = append(passed, "ChatGPT")
+		}
+		if ok, _ := p.checkAntigravity(ip); ok {
+			passed = append(passed, "Antigravity")
+		}
+		if ok, _ := p.checkCursor(ip); ok {
+			passed = append(passed, "Cursor")
+		}
+
+		if len(passed) > 0 {
+			res.IsClean = true
+			res.Reason = fmt.Sprintf("Clean Gateway (%s OK)", strings.Join(passed, ", "))
 		} else {
-			okAg, _ := p.checkAntigravity(ip)
-			if okAg {
-				res.IsClean = true
-				res.Reason = "Clean Universal Gateway (Gemini & Antigravity OK)"
-			} else {
-				res.IsClean = true
-				res.Reason = "Clean Web Gateway (Gemini OK)"
-			}
+			res.IsClean = false
+			res.Reason = "Failed checks for all AI targets"
 		}
 	default:
 		res.IsClean, res.Reason = p.checkGemini(ip)
@@ -91,9 +101,22 @@ func (p *Prober) checkGemini(ip string) (bool, string) {
 		return false, "HTTP Write error"
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := io.ReadAtLeast(tlsConn, buf, 100)
-	resp := strings.ToLower(string(buf[:n]))
+	var respBuilder strings.Builder
+	buf := make([]byte, 2048)
+	for {
+		n, err := tlsConn.Read(buf)
+		if n > 0 {
+			respBuilder.Write(buf[:n])
+			str := strings.ToLower(respBuilder.String())
+			if strings.Contains(str, "\r\n\r\n") || respBuilder.Len() >= 2048 {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	resp := strings.ToLower(respBuilder.String())
 
 	if strings.Contains(resp, "302") || strings.Contains(resp, "sorry") {
 		return false, "Blocked by Google (Captcha /sorry/index)"
@@ -131,10 +154,25 @@ func (p *Prober) checkClaude(ip string) (bool, string) {
 	req := "GET / HTTP/1.1\r\nHost: claude.ai\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
 	_, _ = tlsConn.Write([]byte(req))
 
+	var respBuilder strings.Builder
 	buf := make([]byte, 2048)
-	n, _ := tlsConn.Read(buf)
-	resp := strings.ToLower(string(buf[:n]))
+	for {
+		n, err := tlsConn.Read(buf)
+		if n > 0 {
+			respBuilder.Write(buf[:n])
+			if strings.Contains(respBuilder.String(), "\r\n\r\n") || respBuilder.Len() >= 2048 {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	resp := strings.ToLower(respBuilder.String())
 
+	if strings.Contains(resp, "direct") || strings.Contains(resp, "comss.one") {
+		return false, "Provider Stub (Not a proxy)"
+	}
 	if strings.Contains(resp, "app-unavailable-in-region") || strings.Contains(resp, "not available in your country") {
 		return false, "Regional Block (Anthropic)"
 	}
@@ -162,14 +200,29 @@ func (p *Prober) checkChatGPT(ip string) (bool, string) {
 	req := "GET / HTTP/1.1\r\nHost: chatgpt.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
 	_, _ = tlsConn.Write([]byte(req))
 
+	var respBuilder strings.Builder
 	buf := make([]byte, 2048)
-	n, _ := tlsConn.Read(buf)
-	resp := strings.ToLower(string(buf[:n]))
+	for {
+		n, err := tlsConn.Read(buf)
+		if n > 0 {
+			respBuilder.Write(buf[:n])
+			if strings.Contains(respBuilder.String(), "\r\n\r\n") || respBuilder.Len() >= 2048 {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	resp := strings.ToLower(respBuilder.String())
 
-	if strings.Contains(resp, "unable to load site") || strings.Contains(resp, "vpn") {
+	if strings.Contains(resp, "direct") || strings.Contains(resp, "comss.one") {
+		return false, "Provider Stub (Not a proxy)"
+	}
+	if strings.Contains(resp, "unable to load site") || strings.Contains(resp, "vpn") || strings.Contains(resp, "not available in your country") {
 		return false, "OpenAI Region/VPN Block"
 	}
-	if strings.Contains(resp, "chatgpt") || strings.Contains(resp, "oai-did") || strings.Contains(resp, "cf-ray") {
+	if strings.Contains(resp, "chatgpt") || strings.Contains(resp, "oai-did") || strings.Contains(resp, "cf-ray") || strings.Contains(resp, "server: cloudflare") {
 		return true, "Clean ChatGPT Gateway"
 	}
 
@@ -193,61 +246,201 @@ func (p *Prober) checkAntigravity(ip string) (bool, string) {
 	req := "POST /v1internal:loadCodeAssist HTTP/1.1\r\nHost: daily-cloudcode-pa.googleapis.com\r\nContent-Type: application/json\r\nContent-Length: 2\r\nUser-Agent: Antigravity\r\nConnection: close\r\n\r\n{}"
 	_, _ = tlsConn.Write([]byte(req))
 
+	var respBuilder strings.Builder
 	buf := make([]byte, 2048)
-	n, _ := tlsConn.Read(buf)
-	resp := strings.ToLower(string(buf[:n]))
+	for {
+		n, err := tlsConn.Read(buf)
+		if n > 0 {
+			respBuilder.Write(buf[:n])
+			str := strings.ToLower(respBuilder.String())
+			if strings.Contains(str, "401") || strings.Contains(str, "403") || respBuilder.Len() >= 2048 {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	resp := strings.ToLower(respBuilder.String())
 
 	if (strings.Contains(resp, "401") || strings.Contains(resp, "403")) &&
-		(strings.Contains(resp, "cloudcode") || strings.Contains(resp, "google") || strings.Contains(resp, "unauthenticated")) {
+		(strings.Contains(resp, "cloudcode") || strings.Contains(resp, "google") || strings.Contains(resp, "unauthenticated") || strings.Contains(resp, "loadcodeassist")) {
 		return true, "Clean Antigravity CloudCode Gateway"
 	}
 
 	return false, "CloudCode endpoint rejected or filtered"
 }
 
-// ProbeAllProviders concurrently benchmarks and tests all candidate IPs across registered providers.
-func (p *Prober) ProbeAllProviders(providersList []domain.Provider, target domain.ServiceTarget) []domain.ProbeResult {
-	var candidates []struct {
-		ip       string
-		provID   string
-		provName string
+func (p *Prober) checkCursor(ip string) (bool, string) {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, "443"), p.Timeout)
+	if err != nil {
+		return false, "TCP Timeout"
+	}
+	defer conn.Close()
+
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: "cursor.com"})
+	_ = tlsConn.SetDeadline(time.Now().Add(p.Timeout))
+	if err := tlsConn.Handshake(); err != nil {
+		return false, "TLS Invalid (Not Cursor cert)"
+	}
+	defer tlsConn.Close()
+
+	req := "GET / HTTP/1.1\r\nHost: cursor.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+	_, _ = tlsConn.Write([]byte(req))
+
+	var respBuilder strings.Builder
+	buf := make([]byte, 2048)
+	for {
+		n, err := tlsConn.Read(buf)
+		if n > 0 {
+			respBuilder.Write(buf[:n])
+			if strings.Contains(respBuilder.String(), "\r\n\r\n") || respBuilder.Len() >= 2048 {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	resp := strings.ToLower(respBuilder.String())
+
+	if strings.Contains(resp, "direct") || strings.Contains(resp, "comss.one") {
+		return false, "Provider Stub (Not a proxy)"
+	}
+	if strings.Contains(resp, "not available in your region") || strings.Contains(resp, "app-unavailable-in-region") {
+		return false, "Regional Block (Cursor)"
+	}
+	if strings.Contains(resp, "server: cloudflare") || strings.Contains(resp, "cf-ray") || strings.Contains(resp, "cursor") {
+		return true, "Clean Cursor Gateway"
 	}
 
-	seenIPs := make(map[string]bool)
+	return false, "Non-Cursor Gateway"
+}
 
-	for _, prov := range providersList {
-		if !prov.Enabled {
-			continue
-		}
-		var pool []string
-		pool = append(pool, prov.FallbackIPs...)
-		pool = append(pool, prov.Gateways...)
+type providerCandidate struct {
+	ip       string
+	provID   string
+	provName string
+}
 
-		for _, ip := range pool {
-			if ip != "" && !seenIPs[ip] {
-				seenIPs[ip] = true
-				candidates = append(candidates, struct {
-					ip       string
-					provID   string
-					provName string
-				}{ip: ip, provID: prov.ID, provName: prov.Name})
-			}
+// ProbeAllProviders concurrently benchmarks and tests all candidate IPs across registered providers.
+func (p *Prober) ProbeAllProviders(providersList []domain.Provider, target domain.ServiceTarget) []domain.ProbeResult {
+	var domainsToQuery []string
+	switch target {
+	case domain.TargetGemini:
+		domainsToQuery = []string{"gemini.google.com"}
+	case domain.TargetClaude:
+		domainsToQuery = []string{"claude.ai"}
+	case domain.TargetChatGPT:
+		domainsToQuery = []string{"chatgpt.com"}
+	case domain.TargetAntigravity:
+		domainsToQuery = []string{"daily-cloudcode-pa.googleapis.com"}
+	case domain.TargetCursor:
+		domainsToQuery = []string{"cursor.com"}
+	default:
+		domainsToQuery = []string{
+			"gemini.google.com",
+			"claude.ai",
+			"chatgpt.com",
+			"daily-cloudcode-pa.googleapis.com",
+			"cursor.com",
 		}
 	}
 
 	var results []domain.ProbeResult
 	var mu sync.Mutex
-	var wg sync.WaitGroup
 
+	// Map of provider -> list of candidate IPs
+	type provResolution struct {
+		prov   domain.Provider
+		ips    []string
+		dohErr error
+	}
+
+	resolutionChan := make(chan provResolution, len(providersList))
+	var resWg sync.WaitGroup
+
+	for _, prov := range providersList {
+		if !prov.Enabled {
+			continue
+		}
+		resWg.Add(1)
+		go func(pr domain.Provider) {
+			defer resWg.Done()
+			var resolvedIPs []string
+			var lastErr error
+
+			for _, d := range domainsToQuery {
+				ips, err := ResolveViaProvider(pr, d, p.Timeout)
+				if err != nil {
+					lastErr = err
+				} else {
+					resolvedIPs = append(resolvedIPs, ips...)
+				}
+			}
+
+			resolutionChan <- provResolution{
+				prov:   pr,
+				ips:    resolvedIPs,
+				dohErr: lastErr,
+			}
+		}(prov)
+	}
+
+	resWg.Wait()
+	close(resolutionChan)
+
+	var candidates []providerCandidate
+	seenPerProvider := make(map[string]bool) // Key: provID + "|" + ip
+
+	for res := range resolutionChan {
+		pr := res.prov
+		var pool []string
+		pool = append(pool, res.ips...)
+		pool = append(pool, pr.Gateways...) // ONLY Gateways, NEVER FallbackIPs!
+
+		countForProv := 0
+		for _, ip := range pool {
+			ip = strings.TrimSpace(ip)
+			if ip == "" {
+				continue
+			}
+			key := pr.ID + "|" + ip
+			if !seenPerProvider[key] {
+				seenPerProvider[key] = true
+				candidates = append(candidates, providerCandidate{
+					ip:       ip,
+					provID:   pr.ID,
+					provName: pr.Name,
+				})
+				countForProv++
+			}
+		}
+
+		// If no IPs were obtained from DoH or Gateways, report the failure directly
+		if countForProv == 0 {
+			reason := "Нет доступных шлюзов"
+			if res.dohErr != nil {
+				reason = fmt.Sprintf("DoH ошибка: %v", res.dohErr)
+			}
+			results = append(results, domain.ProbeResult{
+				ProviderID:   pr.ID,
+				ProviderName: pr.Name,
+				IP:           "",
+				LatencyMs:    9999,
+				IsClean:      false,
+				Reason:       reason,
+				Target:       target,
+			})
+		}
+	}
+
+	var wg sync.WaitGroup
 	sem := make(chan struct{}, 20) // Cap concurrency at 20 parallel threads
 
 	for _, cand := range candidates {
 		wg.Add(1)
-		go func(c struct {
-			ip       string
-			provID   string
-			provName string
-		}) {
+		go func(c providerCandidate) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()

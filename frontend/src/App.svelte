@@ -25,7 +25,7 @@
   });
 
   let selectedTarget: string = 'all';
-  let selectedProviderId: string = 'dns-ai';
+  let selectedProviderId: string = 'dns-ai-cf';
   let providers: domain.Provider[] = [];
   let probeResults: domain.ProbeResult[] = [];
   let isTesting: boolean = false;
@@ -56,9 +56,23 @@
   async function loadProviders() {
     try {
       providers = await GetProviders();
+      if (providers.length > 0 && !providers.some(p => p.id === selectedProviderId)) {
+        selectedProviderId = providers[0].id;
+      }
     } catch (err: any) {
       errorMessage = String(err);
     }
+  }
+
+  function getBestProbe(providerId: string): domain.ProbeResult | undefined {
+    const list = probeResults.filter(r => r.provider_id === providerId);
+    if (list.length === 0) return undefined;
+    const cleanList = list.filter(r => r.is_clean);
+    if (cleanList.length > 0) {
+      cleanList.sort((a, b) => (a.latency_ms || 0) - (b.latency_ms || 0));
+      return cleanList[0];
+    }
+    return list[0];
   }
 
   async function handleToggle() {
@@ -92,11 +106,12 @@
       return;
     }
     try {
+      const ep = newEndpoint.trim();
       const p = new domain.Provider({
         id: 'custom-' + Date.now(),
         name: newName.trim(),
-        kind: newEndpoint.startsWith('http') ? 'doh' : 'udp',
-        endpoint: newEndpoint.trim(),
+        kind: ep.startsWith('http') ? 'doh' : 'udp',
+        endpoint: ep,
         fallback_ips: newIP.trim() ? [newIP.trim()] : [],
         gateways: newIP.trim() ? [newIP.trim()] : [],
         enabled: true,
@@ -225,7 +240,7 @@
           <div class="status-text">
             {#if status.is_enabled}
               <div class="status-main">Маршрутизация активна через {status.active_provider || 'Smart DNS'}</div>
-              <div class="status-sub">Шлюз: {status.active_ip || '194.87.196.13'} • Режим: Hosts (Zero-RAM)</div>
+              <div class="status-sub">Шлюз: {status.active_ip || 'Активен'}{status.latency_ms > 0 ? ` (${status.latency_ms} мс)` : ''} • Режим: Hosts (Zero-RAM)</div>
             {:else}
               <div class="status-main">Прямое подключение к сети</div>
               <div class="status-sub">Нажмите кнопку выше для мгновенного обхода ограничений</div>
@@ -265,6 +280,7 @@
 
         <div class="provider-list">
           {#each providers as prov}
+            {@const res = getBestProbe(prov.id)}
             <div class="provider-row" class:is-selected={selectedProviderId === prov.id}>
               <div class="provider-lead">
                 <div class="provider-title">
@@ -281,10 +297,15 @@
               </div>
 
               <div class="provider-meta">
-                {#if probeResults.some(r => r.provider_id === prov.id)}
-                  {@const res = probeResults.find(r => r.provider_id === prov.id)}
-                  <span class="latency-badge" class:fast={res && res.is_clean && res.latency_ms < 80} class:med={res && res.is_clean && res.latency_ms >= 80} class:bad={!res || !res.is_clean}>
-                    {res && res.is_clean ? `${res.latency_ms} ms` : 'Ошибка'}
+                {#if res}
+                  <span
+                    class="latency-badge"
+                    class:fast={res.is_clean && res.latency_ms < 80}
+                    class:med={res.is_clean && res.latency_ms >= 80}
+                    class:bad={!res.is_clean}
+                    title={`${res.ip ? res.ip + ' — ' : ''}${res.reason || ''}`}
+                  >
+                    {res.is_clean ? `${res.latency_ms} ms` : 'Ошибка'}
                   </span>
                 {/if}
 
@@ -367,7 +388,7 @@
 
             <div class="add-grid">
               <input type="text" placeholder="Название (напр. Мой DoH)" bind:value={newName} />
-              <input type="text" placeholder="Адрес (https://.../dns-query или IP)" bind:value={newEndpoint} />
+              <input type="text" placeholder="Адрес (https://ru.dns-ai.ru/...-&#123;?dns&#125; или IP)" bind:value={newEndpoint} />
               <input type="text" placeholder="Резервный IP (опционально)" bind:value={newIP} />
               <button class="btn-primary" on:click={handleAddCustom}>
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
