@@ -2,6 +2,7 @@ package providers
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -117,13 +118,13 @@ type Manager struct {
 	cfgPath   string
 }
 
-// NewManager creates a provider manager, restoring custom additions from disk.
+// NewManager creates a provider manager, restoring custom additions and edits from disk.
 func NewManager() *Manager {
 	m := &Manager{
 		providers: append([]domain.Provider(nil), defaultProviders...),
 		cfgPath:   getConfigFilePath(),
 	}
-	m.loadCustom()
+	m.loadPersisted()
 	return m
 }
 
@@ -148,12 +149,11 @@ func (m *Manager) GetByID(id string) (domain.Provider, bool) {
 	return domain.Provider{}, false
 }
 
-// Add adds or updates a custom provider.
+// Add adds or updates a provider and persists changes.
 func (m *Manager) Add(p domain.Provider) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	p.IsCustom = true
 	found := false
 	for i, exist := range m.providers {
 		if exist.ID == p.ID {
@@ -163,23 +163,57 @@ func (m *Manager) Add(p domain.Provider) error {
 		}
 	}
 	if !found {
+		p.IsCustom = true
 		m.providers = append(m.providers, p)
 	}
 
-	return m.saveCustomLocked()
+	return m.savePersistedLocked()
 }
 
-// Remove deletes a custom provider by ID.
+// Update edits existing provider properties or creates a new one.
+func (m *Manager) Update(p domain.Provider) error {
+	return m.Add(p)
+}
+
+// Toggle flips the enabled state of a provider.
+func (m *Manager) Toggle(id string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i, p := range m.providers {
+		if p.ID == id {
+			m.providers[i].Enabled = enabled
+			return m.savePersistedLocked()
+		}
+	}
+	return fmt.Errorf("provider %s not found", id)
+}
+
+// Remove deletes a provider by ID (or disables if default).
 func (m *Manager) Remove(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for i, p := range m.providers {
-		if p.ID == id && p.IsCustom {
-			m.providers = append(m.providers[:i], m.providers[i+1:]...)
-			return m.saveCustomLocked()
+		if p.ID == id {
+			if p.IsCustom {
+				m.providers = append(m.providers[:i], m.providers[i+1:]...)
+			} else {
+				m.providers[i].Enabled = false
+			}
+			return m.savePersistedLocked()
 		}
 	}
+	return nil
+}
+
+// Reset restores the factory default providers list.
+func (m *Manager) Reset() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.providers = append([]domain.Provider(nil), defaultProviders...)
+	_ = os.Remove(m.cfgPath)
 	return nil
 }
 
@@ -193,28 +227,35 @@ func getConfigFilePath() string {
 	return filepath.Join(targetDir, "custom_providers.json")
 }
 
-func (m *Manager) loadCustom() {
+func (m *Manager) loadPersisted() {
 	data, err := os.ReadFile(m.cfgPath)
 	if err != nil {
 		return
 	}
-	var custom []domain.Provider
-	if err := json.Unmarshal(data, &custom); err == nil {
-		for _, cp := range custom {
-			cp.IsCustom = true
-			m.providers = append(m.providers, cp)
+	var loaded []domain.Provider
+	if err := json.Unmarshal(data, &loaded); err == nil && len(loaded) > 0 {
+		// Index default map for fast lookup
+		byId := make(map[string]int)
+		for i, p := range m.providers {
+			byId[p.ID] = i
+		}
+
+		for _, p := range loaded {
+			if idx, found := byId[p.ID]; found {
+				// Overwrite default provider with user edits
+				m.providers[idx] = p
+			} else {
+				// Append custom provider
+				p.IsCustom = true
+				m.providers = append(m.providers, p)
+			}
 		}
 	}
 }
 
-func (m *Manager) saveCustomLocked() error {
-	var custom []domain.Provider
-	for _, p := range m.providers {
-		if p.IsCustom {
-			custom = append(custom, p)
-		}
-	}
-	data, err := json.MarshalIndent(custom, "", "  ")
+func (m *Manager) savePersistedLocked() error {
+	// Persist all providers so edits, disabled states, and additions persist across reboots
+	data, err := json.MarshalIndent(m.providers, "", "  ")
 	if err != nil {
 		return err
 	}

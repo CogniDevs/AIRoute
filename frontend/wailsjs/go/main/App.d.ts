@@ -16,10 +16,16 @@ export function GetStatus():Promise<domain.RouteState>;
 
 export function RemoveCustomProvider(arg1:string):Promise<void>;
 
+export function ResetDefaultProviders():Promise<void>;
+
 export function TestProviders(arg1:domain.ServiceTarget):Promise<Array<domain.ProbeResult>>;
 
 export function ToggleProxy(enable:boolean, port:number):Promise<domain.RouteState>;
 
+export function ToggleProvider(arg1:string, arg2:boolean):Promise<void>;
+
 export function ToggleRoute(arg1:boolean,arg2:domain.ServiceTarget,arg3:string):Promise<domain.RouteState>;
 
-export function VerifyActive():Promise<Array<domain.ProbeResult>>;
+export function UpdateProvider(arg1:domain.Provider):Promise<void>;
+
+export function VerifyActive():Promise<domain.RouteState>;

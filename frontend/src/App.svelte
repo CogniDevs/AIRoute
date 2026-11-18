@@ -10,7 +10,10 @@
     VerifyActive,
     ToggleProxy,
     AddCustomProvider,
-    RemoveCustomProvider
+    UpdateProvider,
+    ToggleProvider,
+    RemoveCustomProvider,
+    ResetDefaultProviders
   } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js';
   import { domain } from '../wailsjs/go/models';
@@ -54,6 +57,10 @@
   let errorMessage: string = '';
   let successNotice: string = '';
 
+  // Filters
+  let hideBrokenServers: boolean = true;
+  let hideBrokenInSelectors: boolean = true;
+
   // Local selections per service
   let targetEnabled: Record<string, boolean> = {
     gemini: true,
@@ -71,7 +78,16 @@
     cursor: 'auto'
   };
 
-  // Custom provider form
+  // Edit Server Modal state
+  let isEditModalOpen: boolean = false;
+  let editingProvider: domain.Provider | null = null;
+  let editName: string = '';
+  let editEndpoint: string = '';
+  let editGateways: string = '';
+  let editKind: string = 'doh';
+  let editEnabled: boolean = true;
+
+  // New Custom provider form
   let newName: string = '';
   let newEndpoint: string = '';
   let newIP: string = '';
@@ -91,50 +107,83 @@
     return map;
   })();
 
-  $: bestByProvider = (() => {
-    const map: Record<string, { bestLat: number; cleanCount: number; clean: boolean; reason: string }> = {};
+  $: serverStats = (() => {
+    const map: Record<string, {
+      workingCount: number;
+      workingServices: string[];
+      avgLat: number;
+      minLat: number;
+      tested: boolean;
+      clean: boolean;
+      reason: string;
+    }> = {};
+
     for (const p of providers) {
-      let bestLat = 999999;
-      let cleanCount = 0;
-      let reason = '';
+      let latSum = 0;
+      let workingCount = 0;
+      const workingServices: string[] = [];
+      let minLat = 999999;
+      let firstReason = '';
+      let tested = false;
+
       for (const s of ALL_SERVICES) {
         const r = probeMatrix[`${p.id}:${s.id}`];
-        if (r && r.is_clean) {
-          cleanCount++;
-          if (r.latency_ms < bestLat) bestLat = r.latency_ms;
-        } else if (r && !r.is_clean && !reason) {
-          reason = r.reason;
+        if (r) {
+          tested = true;
+          if (r.is_clean) {
+            workingCount++;
+            workingServices.push(s.name);
+            latSum += r.latency_ms;
+            if (r.latency_ms < minLat) minLat = r.latency_ms;
+          } else if (!firstReason) {
+            firstReason = r.reason;
+          }
         }
       }
+
+      const avgLat = workingCount > 0 ? Math.round(latSum / workingCount) : 0;
       map[p.id] = {
-        bestLat: bestLat === 999999 ? 0 : bestLat,
-        cleanCount,
-        clean: cleanCount > 0,
-        reason: reason || (cleanCount > 0 ? 'Рабочий' : 'Не проверен')
+        workingCount,
+        workingServices,
+        avgLat,
+        minLat: minLat === 999999 ? 0 : minLat,
+        tested,
+        clean: workingCount > 0,
+        reason: firstReason || (workingCount > 0 ? 'Рабочий' : 'Не проверен')
       };
     }
     return map;
   })();
 
   $: sortedProviders = [...providers].sort((a, b) => {
-    const sa = bestByProvider[a.id] || { cleanCount: 0, bestLat: 999999 };
-    const sb = bestByProvider[b.id] || { cleanCount: 0, bestLat: 999999 };
-    if (sb.cleanCount !== sa.cleanCount) {
-      return sb.cleanCount - sa.cleanCount;
+    const sa = serverStats[a.id] || { workingCount: 0, avgLat: 999999 };
+    const sb = serverStats[b.id] || { workingCount: 0, avgLat: 999999 };
+    if (sb.workingCount !== sa.workingCount) {
+      return sb.workingCount - sa.workingCount;
     }
-    if (sa.bestLat > 0 && sb.bestLat > 0) {
-      return sa.bestLat - sb.bestLat;
+    if (sa.avgLat > 0 && sb.avgLat > 0) {
+      return sa.avgLat - sb.avgLat;
     }
-    if (sa.bestLat > 0) return -1;
-    if (sb.bestLat > 0) return 1;
+    if (sa.avgLat > 0) return -1;
+    if (sb.avgLat > 0) return 1;
     return 0;
   });
+
+  $: filteredProviders = hideBrokenServers
+    ? sortedProviders.filter(p => {
+        const st = serverStats[p.id];
+        return !st || !st.tested || st.workingCount > 0;
+      })
+    : sortedProviders;
+
+  $: hiddenServersCount = sortedProviders.length - filteredProviders.length;
 
   $: bestGlobalByService = (() => {
     const map: Record<string, domain.ProbeResult | undefined> = {};
     for (const s of ALL_SERVICES) {
       let best: domain.ProbeResult | undefined = undefined;
       for (const p of providers) {
+        if (!p.enabled) continue;
         const r = probeMatrix[`${p.id}:${s.id}`];
         if (r && r.is_clean) {
           if (!best || r.latency_ms < best.latency_ms) {
@@ -221,7 +270,7 @@
         return;
       }
       status = await ApplyAutoBest(enabled);
-      successNotice = 'Лучшие шлюзы успешно подобраны и записаны в hosts';
+      successNotice = 'Лучшие шлюзы подобраны и записаны в hosts';
       setTimeout(() => successNotice = '', 4000);
     } catch (err: any) {
       errorMessage = String(err);
@@ -237,7 +286,7 @@
     try {
       const enabled = getEnabledTargets();
       status = await ApplyRoutes(targetProvider, enabled);
-      successNotice = 'Маршруты успешно применены к hosts';
+      successNotice = 'Маршруты успешно обновлены в hosts';
       setTimeout(() => successNotice = '', 4000);
     } catch (err: any) {
       errorMessage = String(err);
@@ -264,10 +313,11 @@
   async function handleVerifyActive() {
     isVerifying = true;
     errorMessage = '';
+    successNotice = '';
     try {
-      const results = await VerifyActive();
-      probeResults = [...probeResults.filter(r => !results.some(v => v.ip === r.ip && v.target === r.target)), ...results];
-      successNotice = 'Проверка активных шлюзов завершена';
+      // Backend updates fresh RTT directly into route state and hosts metadata
+      status = await VerifyActive();
+      successNotice = 'Пинг активных шлюзов обновлён';
       setTimeout(() => successNotice = '', 3000);
     } catch (err: any) {
       errorMessage = String(err);
@@ -298,7 +348,7 @@
       }
       const enabled = getEnabledTargets();
       status = await ApplyRoutes(targetProvider, enabled);
-      successNotice = `Все активные сервисы переключены на выбранный DNS`;
+      successNotice = 'Все сервисы переключены на выбранный DNS';
       setTimeout(() => successNotice = '', 4000);
     } catch (err: any) {
       errorMessage = String(err);
@@ -326,6 +376,71 @@
     setTimeout(() => successNotice = '', 3000);
   }
 
+  // Provider Editing
+  function openEditModal(prov: domain.Provider) {
+    editingProvider = prov;
+    editName = prov.name;
+    editEndpoint = prov.endpoint;
+    editGateways = (prov.gateways || []).join(', ');
+    editKind = prov.kind || 'doh';
+    editEnabled = prov.enabled;
+    isEditModalOpen = true;
+  }
+
+  function closeEditModal() {
+    isEditModalOpen = false;
+    editingProvider = null;
+  }
+
+  async function handleSaveEditedProvider() {
+    if (!editingProvider || !editName.trim() || !editEndpoint.trim()) {
+      errorMessage = 'Укажите название и адрес сервера';
+      return;
+    }
+    try {
+      const gws = editGateways.split(',').map(s => s.trim()).filter(Boolean);
+      const updated = new domain.Provider({
+        id: editingProvider.id,
+        name: editName.trim(),
+        kind: editKind,
+        endpoint: editEndpoint.trim(),
+        fallback_ips: editingProvider.fallback_ips || [],
+        gateways: gws,
+        enabled: editEnabled,
+        is_custom: editingProvider.is_custom
+      });
+
+      await UpdateProvider(updated);
+      await loadProviders();
+      closeEditModal();
+      successNotice = `Сервер "${updated.name}" сохранен`;
+      setTimeout(() => successNotice = '', 3000);
+    } catch (err: any) {
+      errorMessage = String(err);
+    }
+  }
+
+  async function handleToggleProvider(id: string, current: boolean) {
+    try {
+      await ToggleProvider(id, !current);
+      await loadProviders();
+    } catch (err: any) {
+      errorMessage = String(err);
+    }
+  }
+
+  async function handleResetProviders() {
+    if (!confirm('Сбросить все серверы к стандартным заводским настройкам?')) return;
+    try {
+      await ResetDefaultProviders();
+      await loadProviders();
+      successNotice = 'Серверы сброшены к значениям по умолчанию';
+      setTimeout(() => successNotice = '', 3000);
+    } catch (err: any) {
+      errorMessage = String(err);
+    }
+  }
+
   async function handleAddCustom() {
     if (!newName.trim() || !newEndpoint.trim()) {
       errorMessage = 'Введите название и адрес сервера';
@@ -349,6 +464,8 @@
       newIP = '';
       await loadProviders();
       activeTab = 'servers';
+      successNotice = `Сервер "${p.name}" добавлен`;
+      setTimeout(() => successNotice = '', 3000);
     } catch (err: any) {
       errorMessage = String(err);
     }
@@ -358,6 +475,8 @@
     try {
       await RemoveCustomProvider(id);
       await loadProviders();
+      successNotice = 'Сервер удален';
+      setTimeout(() => successNotice = '', 3000);
     } catch (err: any) {
       errorMessage = String(err);
     }
@@ -469,15 +588,16 @@
             </button>
 
             {#if status.patched_count > 0}
-              <button class="btn-action secondary" disabled={isVerifying} on:click={handleVerifyActive}>
+              <button class="btn-action secondary" disabled={isVerifying} on:click={handleVerifyActive} title="Перепроверить текущие IP в hosts и обновить пинг">
                 {#if isVerifying}
                   <span class="mini-spinner"></span>
+                  <span>Замер...</span>
                 {:else}
                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="20 6 9 17 4 12"></polyline>
                   </svg>
+                  <span>Проверить пинг</span>
                 {/if}
-                <span>Проверить</span>
               </button>
 
               <button class="btn-action danger" disabled={isApplying} on:click={handleClearHosts}>
@@ -489,6 +609,14 @@
               </button>
             {/if}
           </div>
+        </div>
+
+        <!-- Filter toggle for selectors -->
+        <div class="routes-filter-row">
+          <label class="toggle-label">
+            <input type="checkbox" bind:checked={hideBrokenInSelectors} />
+            <span>Скрывать заведомо нерабочие шлюзы в списках выбора</span>
+          </label>
         </div>
 
         <!-- Service Cards Grid -->
@@ -532,20 +660,33 @@
                 <span class="sel-label">Шлюз:</span>
                 <select bind:value={targetProvider[srv.id]} disabled={!targetEnabled[srv.id]}>
                   <option value="auto">
-                    Авто (лучший: {bestGlobalByService[srv.id]?.provider_name || 'будет подобран'})
+                    Авто (лучший: {bestGlobalByService[srv.id]?.provider_name ? `${bestGlobalByService[srv.id]?.provider_name} — ${bestGlobalByService[srv.id]?.latency_ms} ms` : 'будет подобран'})
                   </option>
-                  {#each providers as prov}
-                    <option value={prov.id}>
-                      {prov.name}
-                      {#if probeMatrix[`${prov.id}:${srv.id}`]}
-                        {#if probeMatrix[`${prov.id}:${srv.id}`].is_clean}
-                          — {probeMatrix[`${prov.id}:${srv.id}`].latency_ms} ms
-                        {:else}
-                          — недоступен
-                        {/if}
+
+                  <optgroup label="Рабочие серверы">
+                    {#each providers as prov}
+                      {#if prov.enabled && (!probeMatrix[`${prov.id}:${srv.id}`] || probeMatrix[`${prov.id}:${srv.id}`].is_clean)}
+                        <option value={prov.id}>
+                          {prov.name}
+                          {#if probeMatrix[`${prov.id}:${srv.id}`]}
+                            — {probeMatrix[`${prov.id}:${srv.id}`].latency_ms} ms
+                          {/if}
+                        </option>
                       {/if}
-                    </option>
-                  {/each}
+                    {/each}
+                  </optgroup>
+
+                  {#if !hideBrokenInSelectors}
+                    <optgroup label="Недоступные для этого сервиса">
+                      {#each providers as prov}
+                        {#if prov.enabled && probeMatrix[`${prov.id}:${srv.id}`] && !probeMatrix[`${prov.id}:${srv.id}`].is_clean}
+                          <option value={prov.id} disabled>
+                            {prov.name} — недоступен ({probeMatrix[`${prov.id}:${srv.id}`].reason || 'ошибка'})
+                          </option>
+                        {/if}
+                      {/each}
+                    </optgroup>
+                  {/if}
                 </select>
               </div>
             </div>
@@ -599,21 +740,27 @@
         <div class="view-toolbar">
           <div class="toolbar-info">
             <h2>Доступные DNS-шлюзы</h2>
-            <p>Автоматическая сортировка от лучших к худшим серверам</p>
+            <p>Ранжирование по покрытию сервисов и среднему пингу</p>
           </div>
-          <button class="btn-primary" disabled={isScanning} on:click={handleTestAll}>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" class:rotating={isScanning}>
-              <polyline points="23 4 23 10 17 10"></polyline>
-              <polyline points="1 20 1 14 7 14"></polyline>
-              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-            </svg>
-            <span>{isScanning ? 'Замер пинга...' : 'Замерить пинг всех'}</span>
-          </button>
+          <div class="toolbar-controls">
+            <label class="toggle-label">
+              <input type="checkbox" bind:checked={hideBrokenServers} />
+              <span>Скрыть нерабочие{#if hiddenServersCount > 0} ({hiddenServersCount}){/if}</span>
+            </label>
+            <button class="btn-primary" disabled={isScanning} on:click={handleTestAll}>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" class:rotating={isScanning}>
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
+              <span>{isScanning ? 'Замер пинга...' : 'Замерить пинг всех'}</span>
+            </button>
+          </div>
         </div>
 
         <div class="provider-list">
-          {#each sortedProviders as prov}
-            <div class="provider-row">
+          {#each filteredProviders as prov}
+            <div class="provider-row" class:is-disabled={!prov.enabled}>
               <div class="provider-lead">
                 <div class="provider-title">
                   <span class="provider-name">{prov.name}</span>
@@ -621,7 +768,23 @@
                   {#if prov.is_custom}
                     <span class="tag-custom">Свой</span>
                   {/if}
+                  {#if !prov.enabled}
+                    <span class="tag-disabled">Отключен</span>
+                  {/if}
+
+                  <!-- Coverage Badge -->
+                  {#if serverStats[prov.id] && serverStats[prov.id].tested}
+                    <span
+                      class="coverage-badge"
+                      class:full={serverStats[prov.id].workingCount >= 4}
+                      class:partial={serverStats[prov.id].workingCount > 0 && serverStats[prov.id].workingCount < 4}
+                      class:none={serverStats[prov.id].workingCount === 0}
+                    >
+                      {serverStats[prov.id].workingCount}/5 сервисов
+                    </span>
+                  {/if}
                 </div>
+
                 <span class="provider-endpoint">{prov.endpoint}</span>
 
                 <!-- Service Badges -->
@@ -655,24 +818,26 @@
                     <span class="mini-spinner"></span>
                     <span>Пинг...</span>
                   </div>
-                {:else if bestByProvider[prov.id] && bestByProvider[prov.id].clean}
-                  <span
-                    class="latency-badge"
-                    class:fast={bestByProvider[prov.id].bestLat < 70}
-                    class:med={bestByProvider[prov.id].bestLat >= 70}
-                    title={`${bestByProvider[prov.id].cleanCount}/5 сервисов работают`}
-                  >
-                    {bestByProvider[prov.id].bestLat} ms
-                  </span>
-                {:else if bestByProvider[prov.id] && bestByProvider[prov.id].cleanCount === 0 && probeResults.some(r => r.provider_id === prov.id)}
-                  <span class="latency-badge bad" title={bestByProvider[prov.id].reason}>
+                {:else if serverStats[prov.id] && serverStats[prov.id].workingCount > 0}
+                  <div class="latency-container" title={`Средний пинг рабочих сервисов: ${serverStats[prov.id].avgLat} ms (мин: ${serverStats[prov.id].minLat} ms)`}>
+                    <span
+                      class="latency-badge"
+                      class:fast={serverStats[prov.id].workingCount >= 3 && serverStats[prov.id].avgLat < 100}
+                      class:med={serverStats[prov.id].workingCount >= 3 && serverStats[prov.id].avgLat >= 100}
+                      class:warn={serverStats[prov.id].workingCount < 3}
+                    >
+                      ~{serverStats[prov.id].avgLat} ms
+                    </span>
+                  </div>
+                {:else if serverStats[prov.id] && serverStats[prov.id].tested && serverStats[prov.id].workingCount === 0}
+                  <span class="latency-badge bad" title={serverStats[prov.id].reason}>
                     Недоступен
                   </span>
                 {/if}
 
                 <button
                   class="btn-apply-all"
-                  disabled={isApplying}
+                  disabled={isApplying || !prov.enabled}
                   on:click={() => handleApplyProviderToAll(prov.id)}
                   title="Назначить этот сервер для всех активных сервисов и записать hosts"
                 >
@@ -682,9 +847,17 @@
                   <span>Применить ко всем</span>
                 </button>
 
+                <!-- Edit Server Button -->
+                <button class="btn-icon" on:click={() => openEditModal(prov)} title="Редактировать сервер">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                  </svg>
+                </button>
+
                 {#if prov.is_custom}
                   <button class="btn-del" on:click={() => handleRemove(prov.id)} title="Удалить">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
                       <polyline points="3 6 5 6 21 6"></polyline>
                       <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
                     </svg>
@@ -704,6 +877,9 @@
             <h2>Настройки и свои серверы</h2>
             <p>Управление пользовательскими резолверами и системными параметрами</p>
           </div>
+          <button class="btn-action secondary" on:click={handleResetProviders}>
+            <span>Сбросить серверы к стандартным</span>
+          </button>
         </div>
 
         <div class="settings-form">
@@ -743,6 +919,58 @@
       </div>
     {/if}
   </main>
+
+  <!-- Edit Provider Modal -->
+  {#if isEditModalOpen && editingProvider}
+    <div class="modal-backdrop" on:click|self={closeEditModal} on:keydown={(e) => e.key === 'Escape' && closeEditModal()}>
+      <div class="modal-content">
+        <div class="modal-header">
+          <span class="modal-title">Редактирование сервера</span>
+          <button class="icon-close" on:click={closeEditModal}>✕</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label" for="edit-name">Название сервера:</label>
+            <input id="edit-name" type="text" bind:value={editName} placeholder="Название сервера" />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="edit-ep">DoH / DNS эндпоинт:</label>
+            <input id="edit-ep" type="text" bind:value={editEndpoint} placeholder="https://domain.tld/dns-query" />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="edit-gw">Шлюзы / Прямые IP (через запятую):</label>
+            <input id="edit-gw" type="text" bind:value={editGateways} placeholder="5.129.221.64, 5.129.221.79" />
+          </div>
+
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label" for="edit-kind">Протокол:</label>
+              <select id="edit-kind" bind:value={editKind}>
+                <option value="doh">DoH (DNS over HTTPS)</option>
+                <option value="udp">UDP Standard DNS</option>
+              </select>
+            </div>
+
+            <div class="form-group half checkbox-group">
+              <label class="custom-checkbox">
+                <input type="checkbox" bind:checked={editEnabled} />
+                <span class="checkmark"></span>
+                <span class="cb-label">Сервер включен</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn-action secondary" on:click={closeEditModal}>Отмена</button>
+          <button class="btn-action primary" on:click={handleSaveEditedProvider}>Сохранить</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -882,7 +1110,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 20px;
+    margin-bottom: 14px;
     gap: 16px;
   }
 
@@ -958,6 +1186,14 @@
   }
   .btn-action.danger:hover { background-color: rgba(239, 68, 68, 0.2); }
 
+  .routes-filter-row {
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
   /* Service Cards */
   .service-list {
     display: flex;
@@ -996,6 +1232,7 @@
     display: flex;
     align-items: center;
     margin-top: 2px;
+    gap: 8px;
   }
 
   .custom-checkbox input {
@@ -1040,6 +1277,11 @@
     border: solid white;
     border-width: 0 2px 2px 0;
     transform: rotate(45deg);
+  }
+
+  .cb-label {
+    font-size: 13px;
+    color: var(--text-primary);
   }
 
   .service-info {
@@ -1094,7 +1336,10 @@
 
   .route-lat {
     color: var(--success);
-    font-weight: 500;
+    font-weight: 600;
+    background-color: var(--success-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
   }
 
   .route-inactive {
@@ -1110,7 +1355,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    min-width: 250px;
+    min-width: 270px;
   }
 
   .sel-label {
@@ -1208,6 +1453,23 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 16px;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+
+  .toolbar-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
   }
 
   .toolbar-info h2 {
@@ -1245,6 +1507,11 @@
     justify-content: space-between;
     align-items: center;
     gap: 16px;
+    transition: all 0.15s ease;
+  }
+
+  .provider-row.is-disabled {
+    opacity: 0.55;
   }
 
   .provider-lead {
@@ -1258,6 +1525,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
   }
 
   .provider-name {
@@ -1284,6 +1552,37 @@
     border-radius: 4px;
   }
 
+  .tag-disabled {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--danger);
+    background-color: var(--danger-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .coverage-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+
+  .coverage-badge.full {
+    background-color: var(--success-bg);
+    color: var(--success);
+  }
+
+  .coverage-badge.partial {
+    background-color: var(--warning-bg);
+    color: var(--warning);
+  }
+
+  .coverage-badge.none {
+    background-color: var(--danger-bg);
+    color: var(--danger);
+  }
+
   .provider-endpoint {
     font-size: 12px;
     color: var(--text-muted);
@@ -1301,7 +1600,7 @@
   .s-badge {
     font-size: 10px;
     font-weight: 600;
-    padding: 1px 6px;
+    padding: 2px 6px;
     border-radius: 4px;
     background-color: var(--bg-surface);
     color: var(--text-muted);
@@ -1342,7 +1641,7 @@
   .latency-badge {
     font-size: 12px;
     font-weight: 600;
-    padding: 4px 8px;
+    padding: 5px 9px;
     border-radius: 6px;
     background-color: var(--bg-surface);
     color: var(--text-secondary);
@@ -1356,6 +1655,12 @@
   .latency-badge.med {
     background-color: var(--warning-bg);
     color: var(--warning);
+  }
+
+  .latency-badge.warn {
+    background-color: rgba(245, 158, 11, 0.15);
+    color: var(--warning);
+    border: 1px solid rgba(245, 158, 11, 0.3);
   }
 
   .latency-badge.bad {
@@ -1376,11 +1681,21 @@
     color: var(--primary);
   }
 
+  .btn-icon {
+    color: var(--text-secondary);
+    padding: 6px;
+    border-radius: 6px;
+    background-color: var(--bg-surface);
+  }
+  .btn-icon:hover { color: var(--primary); background-color: var(--bg-surface-hover); }
+
   .btn-del {
     color: var(--text-muted);
     padding: 6px;
+    border-radius: 6px;
+    background-color: var(--bg-surface);
   }
-  .btn-del:hover { color: var(--danger); }
+  .btn-del:hover { color: var(--danger); background-color: var(--bg-surface-hover); }
 
   /* Settings Form */
   .settings-form {
@@ -1419,6 +1734,34 @@
     display: grid;
     grid-template-columns: 1fr 1.5fr 1fr auto;
     gap: 10px;
+  }
+
+  /* Form inside modal */
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .form-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .form-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .form-group.half {
+    flex: 1;
+  }
+
+  .checkbox-group {
+    display: flex;
+    align-items: flex-start;
+    padding-top: 18px;
   }
 
   @media (max-width: 680px) {

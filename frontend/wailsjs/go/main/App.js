@@ -34,6 +34,10 @@ export function RemoveCustomProvider(arg1) {
   return window['go']['main']['App']['RemoveCustomProvider'](arg1);
 }
 
+export function ResetDefaultProviders() {
+  return window['go']['main']['App']['ResetDefaultProviders']();
+}
+
 export function TestProviders(arg1) {
   return window['go']['main']['App']['TestProviders'](arg1);
 }
@@ -42,8 +46,16 @@ export function ToggleProxy(enable, port) {
   return window['go']['main']['App']['ToggleProxy'](enable, port);
 }
 
+export function ToggleProvider(arg1, arg2) {
+  return window['go']['main']['App']['ToggleProvider'](arg1, arg2);
+}
+
 export function ToggleRoute(arg1, arg2, arg3) {
   return window['go']['main']['App']['ToggleRoute'](arg1, arg2, arg3);
+}
+
+export function UpdateProvider(arg1) {
+  return window['go']['main']['App']['UpdateProvider'](arg1);
 }
 
 export function VerifyActive() {

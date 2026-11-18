@@ -226,10 +226,61 @@ func (a *App) ClearRoutes() (domain.RouteState, error) {
 	return a.GetStatus(), nil
 }
 
-// VerifyActive performs a quick concurrent probe of only currently routed active IPs.
-func (a *App) VerifyActive() []domain.ProbeResult {
-	_, routes, _, _ := a.hostsMgr.GetActiveRoutes()
-	return a.prober.VerifyActiveRoutes(routes)
+// VerifyActive performs a quick concurrent probe of only currently routed active IPs and updates routes.
+func (a *App) VerifyActive() domain.RouteState {
+	isActive, routes, _, _ := a.hostsMgr.GetActiveRoutes()
+	if !isActive {
+		return a.GetStatus()
+	}
+
+	results := a.prober.VerifyActiveRoutes(routes)
+
+	a.mu.Lock()
+	for _, r := range results {
+		found := false
+		for i, p := range a.latestProbes {
+			if p.Target == r.Target && p.ProviderID == r.ProviderID && p.IP == r.IP {
+				a.latestProbes[i] = r
+				found = true
+				break
+			}
+		}
+		if !found {
+			a.latestProbes = append(a.latestProbes, r)
+		}
+
+		if route, exists := routes[r.Target]; exists {
+			route.LatencyMs = r.LatencyMs
+			routes[r.Target] = route
+		}
+	}
+	a.mu.Unlock()
+
+	// Persist fresh latencies in hosts metadata comments
+	_ = a.hostsMgr.ApplyServiceRoutes(routes)
+
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "probe:done", map[string]interface{}{
+			"results": results,
+		})
+	}
+
+	return a.GetStatus()
+}
+
+// UpdateProvider adds or updates a provider (custom or overridden built-in).
+func (a *App) UpdateProvider(p domain.Provider) error {
+	return a.providersMgr.Update(p)
+}
+
+// ToggleProvider enables or disables a provider.
+func (a *App) ToggleProvider(id string, enabled bool) error {
+	return a.providersMgr.Toggle(id, enabled)
+}
+
+// ResetDefaultProviders resets all providers back to factory defaults.
+func (a *App) ResetDefaultProviders() error {
+	return a.providersMgr.Reset()
 }
 
 // ToggleProxy enables or disables embedded local HTTP CONNECT proxy.
