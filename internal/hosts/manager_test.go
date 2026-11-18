@@ -21,9 +21,9 @@ func TestHostsManager_ApplyAndClear(t *testing.T) {
 	mgr := &Manager{hostsPath: hostsFile}
 
 	// 1. Verify initially inactive
-	isActive, ip, _, _ := mgr.GetActiveState()
-	if isActive || ip != "" {
-		t.Errorf("expected inactive route, got active=%v, ip=%s", isActive, ip)
+	isActive, routes, patchedCount, totalCount := mgr.GetActiveRoutes()
+	if isActive || patchedCount != 0 || totalCount != 5 {
+		t.Errorf("expected inactive route, got active=%v, patched=%d, total=%d", isActive, patchedCount, totalCount)
 	}
 
 	// 2. Apply Route with TargetGemini
@@ -32,19 +32,14 @@ func TestHostsManager_ApplyAndClear(t *testing.T) {
 		t.Fatalf("ApplyRoute failed: %v", err)
 	}
 
-	// 3. Verify Active State and correctly parsed Target
-	isActive, ip, target, prov := mgr.GetActiveState()
-	if !isActive {
-		t.Errorf("expected active route")
+	// 3. Verify Active State and correctly parsed per-service route
+	isActive, routes, patchedCount, _ = mgr.GetActiveRoutes()
+	if !isActive || patchedCount != 1 {
+		t.Errorf("expected 1 active route, got active=%v, count=%d", isActive, patchedCount)
 	}
-	if ip != targetIP {
-		t.Errorf("expected IP %s, got %s", targetIP, ip)
-	}
-	if prov != "Test-DNS" {
-		t.Errorf("expected provider Test-DNS, got %s", prov)
-	}
-	if target != domain.TargetGemini {
-		t.Errorf("expected target %s, got %s", domain.TargetGemini, target)
+	geminiRoute := routes[domain.TargetGemini]
+	if !geminiRoute.Enabled || geminiRoute.IP != targetIP {
+		t.Errorf("expected gemini route with IP %s, got %+v", targetIP, geminiRoute)
 	}
 
 	// Check file content preserves initial lines
@@ -57,50 +52,71 @@ func TestHostsManager_ApplyAndClear(t *testing.T) {
 		t.Errorf("routed domain missing from hosts: %s", content)
 	}
 
-	// 4. Test ApplyMultiRoute with per-service IPs
-	multiIPs := map[domain.ServiceTarget]string{
-		domain.TargetGemini:  "45.83.27.4",
-		domain.TargetClaude:  "5.129.221.64",
-		domain.TargetChatGPT: "193.233.112.88",
-	}
-	if err := mgr.ApplyMultiRoute(domain.TargetAll, multiIPs, "1.1.1.1", "Multi-DNS"); err != nil {
-		t.Fatalf("ApplyMultiRoute failed: %v", err)
-	}
-
-	isActive, _, target, prov = mgr.GetActiveState()
-	if !isActive || target != domain.TargetAll || prov != "Multi-DNS" {
-		t.Errorf("ApplyMultiRoute state mismatch: active=%v, target=%s, prov=%s", isActive, target, prov)
-	}
-
-	multiContentBytes, _ := os.ReadFile(hostsFile)
-	multiContent := string(multiContentBytes)
-	if !strings.Contains(multiContent, "45.83.27.4") || !strings.Contains(multiContent, "gemini.google.com") {
-		t.Errorf("gemini multi route missing: %s", multiContent)
-	}
-	if !strings.Contains(multiContent, "5.129.221.64") || !strings.Contains(multiContent, "claude.ai") {
-		t.Errorf("claude multi route missing: %s", multiContent)
-	}
-	if !strings.Contains(multiContent, "193.233.112.88") || !strings.Contains(multiContent, "chatgpt.com") {
-		t.Errorf("chatgpt multi route missing: %s", multiContent)
+	// 4. Test ApplyServiceRoutes with rich metadata
+	serviceRoutes := map[domain.ServiceTarget]domain.ServiceRoute{
+		domain.TargetGemini: {
+			Target:       domain.TargetGemini,
+			Enabled:      true,
+			ProviderName: "Zapret DNS",
+			IP:           "5.129.221.64",
+			LatencyMs:    38,
+		},
+		domain.TargetClaude: {
+			Target:       domain.TargetClaude,
+			Enabled:      true,
+			ProviderName: "GeoHide",
+			IP:           "31.25.239.132",
+			LatencyMs:    45,
+		},
+		domain.TargetChatGPT: {
+			Target:       domain.TargetChatGPT,
+			Enabled:      false, // Disabled by user
+			ProviderName: "MagicDNS",
+			IP:           "45.83.27.4",
+			LatencyMs:    50,
+		},
 	}
 
-	// 5. Clear Route
+	if err := mgr.ApplyServiceRoutes(serviceRoutes); err != nil {
+		t.Fatalf("ApplyServiceRoutes failed: %v", err)
+	}
+
+	isActive, parsedRoutes, patchedCount, _ := mgr.GetActiveRoutes()
+	if !isActive || patchedCount != 2 {
+		t.Fatalf("expected 2 active patched routes, got %d", patchedCount)
+	}
+
+	rGemini := parsedRoutes[domain.TargetGemini]
+	if !rGemini.Enabled || rGemini.IP != "5.129.221.64" || rGemini.ProviderName != "Zapret DNS" || rGemini.LatencyMs != 38 {
+		t.Errorf("gemini route mismatch: %+v", rGemini)
+	}
+
+	rClaude := parsedRoutes[domain.TargetClaude]
+	if !rClaude.Enabled || rClaude.IP != "31.25.239.132" || rClaude.ProviderName != "GeoHide" || rClaude.LatencyMs != 45 {
+		t.Errorf("claude route mismatch: %+v", rClaude)
+	}
+
+	rChatGPT := parsedRoutes[domain.TargetChatGPT]
+	if rChatGPT.Enabled {
+		t.Errorf("chatgpt was disabled, but got enabled in parsed routes")
+	}
+
+	// 5. Test ClearRoute
 	if err := mgr.ClearRoute(); err != nil {
 		t.Fatalf("ClearRoute failed: %v", err)
 	}
 
-	isActive, _, _, _ = mgr.GetActiveState()
-	if isActive {
-		t.Errorf("expected inactive after ClearRoute")
+	isActive, _, patchedCount, _ = mgr.GetActiveRoutes()
+	if isActive || patchedCount != 0 {
+		t.Errorf("expected 0 active routes after ClearRoute, got %d", patchedCount)
 	}
 
-	// Check file content reverted cleanly without leaving markers
 	contentBytes, _ = os.ReadFile(hostsFile)
 	content = string(contentBytes)
 	if strings.Contains(content, SectionStartMarker) || strings.Contains(content, SectionEndMarker) {
-		t.Errorf("AIRoute markers remained in hosts after clear: %s", content)
+		t.Errorf("markers remained after ClearRoute: %s", content)
 	}
 	if !strings.Contains(content, "192.168.1.10 my-router") {
-		t.Errorf("user custom hosts entry was lost after clear: %s", content)
+		t.Errorf("user custom hosts entry was lost after ClearRoute: %s", content)
 	}
 }

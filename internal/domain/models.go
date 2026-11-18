@@ -14,6 +14,15 @@ const (
 	TargetCursor      ServiceTarget = "cursor"
 )
 
+// AllServiceTargets lists all concrete AI targets (excluding TargetAll).
+var AllServiceTargets = []ServiceTarget{
+	TargetGemini,
+	TargetClaude,
+	TargetChatGPT,
+	TargetAntigravity,
+	TargetCursor,
+}
+
 // TargetDomains maps each service target to its critical routed domain list.
 var TargetDomains = map[ServiceTarget][]string{
 	TargetGemini: {
@@ -103,13 +112,13 @@ type Provider struct {
 
 // ProbeResult stores latency and health verification for a candidate IP or gateway.
 type ProbeResult struct {
-	ProviderID  string        `json:"provider_id"`
-	ProviderName string       `json:"provider_name"`
-	IP          string        `json:"ip"`
-	LatencyMs   int64         `json:"latency_ms"`
-	IsClean     bool          `json:"is_clean"`
-	Reason      string        `json:"reason"`
-	Target      ServiceTarget `json:"target"`
+	ProviderID   string        `json:"provider_id"`
+	ProviderName string        `json:"provider_name"`
+	IP           string        `json:"ip"`
+	LatencyMs    int64         `json:"latency_ms"`
+	IsClean      bool          `json:"is_clean"`
+	Reason       string        `json:"reason"`
+	Target       ServiceTarget `json:"target"`
 }
 
 // RouteMode indicates how traffic is redirected.
@@ -121,14 +130,30 @@ const (
 	ModeProxy RouteMode = "proxy" // Embedded local HTTP CONNECT proxy
 )
 
+// ServiceRoute represents the configured routing for a specific AI service.
+type ServiceRoute struct {
+	Target       ServiceTarget `json:"target"`
+	Enabled      bool          `json:"enabled"`
+	ProviderID   string        `json:"provider_id"` // "auto" or specific provider ID
+	ProviderName string        `json:"provider_name"`
+	IP           string        `json:"ip"`
+	LatencyMs    int64         `json:"latency_ms"`
+}
+
 // RouteState represents the live status of the system routing.
 type RouteState struct {
-	IsEnabled      bool          `json:"is_enabled"`
-	ActiveMode     RouteMode     `json:"active_mode"`
-	ActiveTarget   ServiceTarget `json:"active_target"`
-	ActiveProvider string        `json:"active_provider"`
-	ActiveIP       string        `json:"active_ip"`
-	LatencyMs      int64         `json:"latency_ms"`
-	LastUpdated    time.Time     `json:"last_updated"`
-	Message        string        `json:"message"`
+	IsEnabled      bool                         `json:"is_enabled"`
+	ActiveMode     RouteMode                    `json:"active_mode"`
+	ActiveTarget   ServiceTarget                `json:"active_target"`
+	ActiveProvider string                       `json:"active_provider"`
+	ActiveIP       string                       `json:"active_ip"`
+	LatencyMs      int64                        `json:"latency_ms"`
+	LastUpdated    time.Time                    `json:"last_updated"`
+	Message        string                       `json:"message"`
+	Routes         map[ServiceTarget]ServiceRoute `json:"routes"`
+	PatchedCount   int                          `json:"patched_count"`
+	TotalCount     int                          `json:"total_count"`
+	HostsPath      string                       `json:"hosts_path"`
+	ProxyRunning   bool                         `json:"proxy_running"`
+	ProxyAddr      string                       `json:"proxy_addr"`
 }

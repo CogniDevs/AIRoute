@@ -11,6 +11,9 @@ import (
 	"airoute/internal/hosts"
 	"airoute/internal/probe"
 	"airoute/internal/providers"
+	"airoute/internal/proxy"
+
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App struct manages core backend services and bridges with Wails frontend.
@@ -19,10 +22,10 @@ type App struct {
 	providersMgr *providers.Manager
 	hostsMgr     *hosts.Manager
 	prober       *probe.Prober
+	proxyServer  *proxy.Server
 
-	mu            sync.RWMutex
-	lastLatencyMs int64
-	lastProbes    map[string][]domain.ProbeResult // Key: target
+	mu           sync.RWMutex
+	latestProbes []domain.ProbeResult
 }
 
 // NewApp creates a new App application struct.
@@ -31,7 +34,7 @@ func NewApp() *App {
 		providersMgr: providers.NewManager(),
 		hostsMgr:     hosts.NewManager(),
 		prober:       probe.NewProber(3 * time.Second),
-		lastProbes:   make(map[string][]domain.ProbeResult),
+		proxyServer:  proxy.NewServer(),
 	}
 }
 
@@ -40,205 +43,233 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
-// GetStatus returns the current route state and whether hosts are currently active.
+// GetStatus returns the current route state, parsing hosts and proxy status.
 func (a *App) GetStatus() domain.RouteState {
-	isActive, ip, target, provider := a.hostsMgr.GetActiveState()
+	isActive, routes, patchedCount, totalCount := a.hostsMgr.GetActiveRoutes()
 
-	a.mu.RLock()
-	lat := a.lastLatencyMs
-	a.mu.RUnlock()
+	proxyRunning := a.proxyServer.IsRunning()
+	proxyAddr := a.proxyServer.GetAddr()
+
+	mode := domain.ModeHosts
+	if proxyRunning && !isActive {
+		mode = domain.ModeProxy
+	}
 
 	state := domain.RouteState{
-		IsEnabled:      isActive,
-		ActiveMode:     domain.ModeHosts,
-		ActiveTarget:   target,
-		ActiveProvider: provider,
-		ActiveIP:       ip,
-		LatencyMs:      lat,
-		LastUpdated:    time.Now(),
+		IsEnabled:    isActive || proxyRunning,
+		ActiveMode:   mode,
+		LastUpdated:  time.Now(),
+		Routes:       routes,
+		PatchedCount: patchedCount,
+		TotalCount:   totalCount,
+		HostsPath:    a.hostsMgr.GetHostsPath(),
+		ProxyRunning: proxyRunning,
+		ProxyAddr:    proxyAddr,
 	}
 
 	if isActive {
-		state.Message = fmt.Sprintf("Маршрутизация активна (%s через %s)", ip, provider)
+		state.Message = fmt.Sprintf("Hosts пропатчен: активно %d из %d сервисов", patchedCount, totalCount)
+	} else if proxyRunning {
+		state.Message = fmt.Sprintf("Локальный прокси активен (%s)", proxyAddr)
 	} else {
-		state.Message = "Маршрутизация отключена (дефолтный DNS)"
+		state.Message = "Маршрутизация выключена (дефолтный DNS системы)"
 	}
 
 	return state
 }
 
-// ToggleRoute enables or disables smart routing for the requested target.
-func (a *App) ToggleRoute(enable bool, target domain.ServiceTarget, providerID string) (domain.RouteState, error) {
-	if !enable {
-		if err := a.hostsMgr.ClearRoute(); err != nil {
-			return a.GetStatus(), fmt.Errorf("не удалось отключить маршрутизацию: %w", err)
+// GetHostsPath returns the detected system hosts file path.
+func (a *App) GetHostsPath() string {
+	return a.hostsMgr.GetHostsPath()
+}
+
+// TestProviders streams benchmarks across all providers and AI targets.
+func (a *App) TestProviders(target domain.ServiceTarget) []domain.ProbeResult {
+	targets := domain.AllServiceTargets
+	if target != "" && target != domain.TargetAll {
+		targets = []domain.ServiceTarget{target}
+	}
+
+	allProviders := a.providersMgr.GetAll()
+	var provIDs []string
+	for _, p := range allProviders {
+		if p.Enabled {
+			provIDs = append(provIDs, p.ID)
 		}
+	}
+
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "probe:start", provIDs)
+	}
+
+	onStart := func(provID string) {
+		if a.ctx != nil {
+			wailsruntime.EventsEmit(a.ctx, "probe:provider_start", provID)
+		}
+	}
+
+	onDone := func(provID string, results []domain.ProbeResult) {
 		a.mu.Lock()
-		a.lastLatencyMs = 0
+		// Remove previous results for this provider
+		var filtered []domain.ProbeResult
+		for _, r := range a.latestProbes {
+			if r.ProviderID != provID {
+				filtered = append(filtered, r)
+			}
+		}
+		a.latestProbes = append(filtered, results...)
 		a.mu.Unlock()
+
+		if a.ctx != nil {
+			wailsruntime.EventsEmit(a.ctx, "probe:provider", map[string]interface{}{
+				"provider_id": provID,
+				"results":     results,
+			})
+		}
+	}
+
+	results := a.prober.ProbeAllProvidersStream(allProviders, targets, onStart, onDone)
+
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "probe:done", map[string]interface{}{
+			"results": results,
+		})
+	}
+
+	return results
+}
+
+// ApplyAutoBest automatically resolves the lowest latency clean IP for each enabled target and patches hosts.
+func (a *App) ApplyAutoBest(enabledTargets []domain.ServiceTarget) (domain.RouteState, error) {
+	if len(enabledTargets) == 0 {
+		enabledTargets = domain.AllServiceTargets
+	}
+
+	selections := make(map[domain.ServiceTarget]string)
+	for _, t := range enabledTargets {
+		selections[t] = "auto"
+	}
+
+	return a.ApplyRoutes(selections, enabledTargets)
+}
+
+// ApplyRoutes applies selected gateways per target to hosts and local proxy.
+func (a *App) ApplyRoutes(selections map[domain.ServiceTarget]string, enabledTargets []domain.ServiceTarget) (domain.RouteState, error) {
+	enabledMap := make(map[domain.ServiceTarget]bool)
+	for _, t := range enabledTargets {
+		enabledMap[t] = true
+	}
+
+	routes := make(map[domain.ServiceTarget]domain.ServiceRoute)
+
+	// Check if we need to run initial scan
+	a.mu.RLock()
+	probesCount := len(a.latestProbes)
+	a.mu.RUnlock()
+
+	if probesCount == 0 {
+		_ = a.TestProviders(domain.TargetAll)
+	}
+
+	for _, target := range domain.AllServiceTargets {
+		if !enabledMap[target] {
+			routes[target] = domain.ServiceRoute{
+				Target:  target,
+				Enabled: false,
+			}
+			continue
+		}
+
+		provID := selections[target]
+		if provID == "" {
+			provID = "auto"
+		}
+
+		bestIP, provName, resolvedProvID, lat := a.findBestGateway(target, provID)
+		if bestIP == "" {
+			// Try on-demand scan if not found
+			bestIP, provName, resolvedProvID, lat = a.probeOnDemand(target, provID)
+		}
+
+		if bestIP == "" {
+			return a.GetStatus(), fmt.Errorf("не удалось найти рабочий чистый шлюз для сервиса %s", target)
+		}
+
+		routes[target] = domain.ServiceRoute{
+			Target:       target,
+			Enabled:      true,
+			ProviderID:   resolvedProvID,
+			ProviderName: provName,
+			IP:           bestIP,
+			LatencyMs:    lat,
+		}
+	}
+
+	// Apply to system hosts file
+	if err := a.hostsMgr.ApplyServiceRoutes(routes); err != nil {
+		return a.GetStatus(), fmt.Errorf("ошибка записи в hosts: %w", err)
+	}
+
+	// If local proxy is running, synchronize its routes
+	if a.proxyServer.IsRunning() {
+		a.proxyServer.UpdateRoutes(routes)
+	}
+
+	return a.GetStatus(), nil
+}
+
+// ClearRoutes removes the AIRoute section from the hosts file.
+func (a *App) ClearRoutes() (domain.RouteState, error) {
+	if err := a.hostsMgr.ClearRoute(); err != nil {
+		return a.GetStatus(), fmt.Errorf("ошибка очистки hosts: %w", err)
+	}
+	return a.GetStatus(), nil
+}
+
+// VerifyActive performs a quick concurrent probe of only currently routed active IPs.
+func (a *App) VerifyActive() []domain.ProbeResult {
+	_, routes, _, _ := a.hostsMgr.GetActiveRoutes()
+	return a.prober.VerifyActiveRoutes(routes)
+}
+
+// ToggleProxy enables or disables embedded local HTTP CONNECT proxy.
+func (a *App) ToggleProxy(enable bool, port int) (domain.RouteState, error) {
+	if port <= 0 {
+		port = 2080
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	if !enable {
+		if err := a.proxyServer.Stop(); err != nil {
+			return a.GetStatus(), fmt.Errorf("ошибка остановки прокси: %w", err)
+		}
 		return a.GetStatus(), nil
 	}
 
-	if target == "" {
-		target = domain.TargetAll
+	_, routes, _, _ := a.hostsMgr.GetActiveRoutes()
+	a.proxyServer.UpdateRoutes(routes)
+
+	if err := a.proxyServer.Start(addr); err != nil {
+		return a.GetStatus(), fmt.Errorf("ошибка запуска прокси на %s: %w", addr, err)
 	}
 
-	// 1. Find chosen provider
-	var chosenProvider domain.Provider
-	if providerID != "" {
-		if p, found := a.providersMgr.GetByID(providerID); found {
-			chosenProvider = p
-		}
-	}
-
-	if chosenProvider.ID == "" {
-		all := a.providersMgr.GetAll()
-		if len(all) == 0 {
-			return a.GetStatus(), fmt.Errorf("список DNS провайдеров пуст")
-		}
-		// Prefer dns-ai-cf if available, else first
-		for _, p := range all {
-			if p.ID == "dns-ai-cf" {
-				chosenProvider = p
-				break
-			}
-		}
-		if chosenProvider.ID == "" {
-			chosenProvider = all[0]
-		}
-	}
-
-	// 2. Determine target services
-	var services []domain.ServiceTarget
-	if target == domain.TargetAll {
-		services = []domain.ServiceTarget{
-			domain.TargetGemini,
-			domain.TargetClaude,
-			domain.TargetChatGPT,
-			domain.TargetAntigravity,
-			domain.TargetCursor,
-		}
-	} else {
-		services = []domain.ServiceTarget{target}
-	}
-
-	serviceIPs := make(map[domain.ServiceTarget]string)
-	serviceLatencies := make(map[domain.ServiceTarget]int64)
-	var lastErrReason string
-
-	// 3. For each service, resolve via DoH/DNS and probe candidate gateways
-	for _, srv := range services {
-		var testDomain string
-		switch srv {
-		case domain.TargetGemini:
-			testDomain = "gemini.google.com"
-		case domain.TargetClaude:
-			testDomain = "claude.ai"
-		case domain.TargetChatGPT:
-			testDomain = "chatgpt.com"
-		case domain.TargetAntigravity:
-			testDomain = "daily-cloudcode-pa.googleapis.com"
-		case domain.TargetCursor:
-			testDomain = "cursor.com"
-		default:
-			testDomain = "gemini.google.com"
-		}
-
-		resolvedIPs, err := probe.ResolveViaProvider(chosenProvider, testDomain, a.prober.Timeout)
-		if err != nil {
-			lastErrReason = fmt.Sprintf("DoH резолв %s: %v", testDomain, err)
-		}
-
-		// Candidates = resolved IPs + provider gateways (NEVER FallbackIPs)
-		var candidates []string
-		candidates = append(candidates, resolvedIPs...)
-		candidates = append(candidates, chosenProvider.Gateways...)
-
-		seen := make(map[string]bool)
-		var bestIP string
-		var bestLat int64 = 999999
-
-		for _, ip := range candidates {
-			ip = strings.TrimSpace(ip)
-			if ip == "" || seen[ip] {
-				continue
-			}
-			seen[ip] = true
-
-			res := a.prober.ProbeIP(ip, srv)
-			if res.IsClean {
-				if bestIP == "" || res.LatencyMs < bestLat {
-					bestIP = ip
-					bestLat = res.LatencyMs
-				}
-			} else {
-				if lastErrReason == "" {
-					lastErrReason = res.Reason
-				}
-			}
-		}
-
-		if bestIP != "" {
-			serviceIPs[srv] = bestIP
-			serviceLatencies[srv] = bestLat
-		}
-	}
-
-	// 4. Validate that we found at least one clean gateway
-	if target != domain.TargetAll && serviceIPs[target] == "" {
-		if lastErrReason == "" {
-			lastErrReason = "шлюзы недоступны или заблокированы"
-		}
-		return a.GetStatus(), fmt.Errorf("не найден рабочий шлюз для %s через %s (%s)", target, chosenProvider.Name, lastErrReason)
-	}
-
-	if target == domain.TargetAll && len(serviceIPs) == 0 {
-		if lastErrReason == "" {
-			lastErrReason = "шлюзы недоступны или заблокированы"
-		}
-		return a.GetStatus(), fmt.Errorf("не найден ни один рабочий шлюз через %s (%s)", chosenProvider.Name, lastErrReason)
-	}
-
-	// 5. Select overall best IP and latency
-	var bestOverallIP string
-	var bestOverallLat int64 = 999999
-
-	for srv, ip := range serviceIPs {
-		lat := serviceLatencies[srv]
-		if bestOverallIP == "" || lat < bestOverallLat {
-			bestOverallIP = ip
-			bestOverallLat = lat
-		}
-	}
-
-	// 6. Apply to hosts
-	if err := a.hostsMgr.ApplyMultiRoute(target, serviceIPs, bestOverallIP, chosenProvider.Name); err != nil {
-		return a.GetStatus(), fmt.Errorf("ошибка записи hosts: %w", err)
-	}
-
-	a.mu.Lock()
-	a.lastLatencyMs = bestOverallLat
-	a.mu.Unlock()
-
-	status := a.GetStatus()
-	status.ActiveIP = bestOverallIP
-	status.LatencyMs = bestOverallLat
-	return status, nil
+	return a.GetStatus(), nil
 }
 
-// TestProviders scans and benchmarks all registered providers for the given AI target.
-func (a *App) TestProviders(target domain.ServiceTarget) []domain.ProbeResult {
-	if target == "" {
-		target = domain.TargetAll
+// ToggleRoute provides backward compatibility for single-switch toggling.
+func (a *App) ToggleRoute(enable bool, target domain.ServiceTarget, providerID string) (domain.RouteState, error) {
+	if !enable {
+		return a.ClearRoutes()
 	}
-	all := a.providersMgr.GetAll()
-	results := a.prober.ProbeAllProviders(all, target)
-
-	a.mu.Lock()
-	a.lastProbes[string(target)] = results
-	a.mu.Unlock()
-
-	return results
+	targets := domain.AllServiceTargets
+	if target != "" && target != domain.TargetAll {
+		targets = []domain.ServiceTarget{target}
+	}
+	selections := make(map[domain.ServiceTarget]string)
+	for _, t := range targets {
+		selections[t] = providerID
+	}
+	return a.ApplyRoutes(selections, targets)
 }
 
 // GetProviders returns the registered DNS / DoH catalog.
@@ -257,4 +288,68 @@ func (a *App) AddCustomProvider(p domain.Provider) error {
 // RemoveCustomProvider removes a custom provider by ID.
 func (a *App) RemoveCustomProvider(id string) error {
 	return a.providersMgr.Remove(id)
+}
+
+func (a *App) findBestGateway(target domain.ServiceTarget, provID string) (bestIP string, provName string, resolvedProvID string, minLat int64) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	minLat = 999999
+	for _, r := range a.latestProbes {
+		if r.Target != target || !r.IsClean || strings.TrimSpace(r.IP) == "" {
+			continue
+		}
+
+		if provID != "auto" && provID != "" && r.ProviderID != provID {
+			continue
+		}
+
+		if r.LatencyMs < minLat {
+			minLat = r.LatencyMs
+			bestIP = r.IP
+			provName = r.ProviderName
+			resolvedProvID = r.ProviderID
+		}
+	}
+
+	if resolvedProvID == "" && provID != "auto" {
+		resolvedProvID = provID
+		if p, found := a.providersMgr.GetByID(provID); found {
+			provName = p.Name
+		}
+	}
+
+	return bestIP, provName, resolvedProvID, minLat
+}
+
+func (a *App) probeOnDemand(target domain.ServiceTarget, provID string) (string, string, string, int64) {
+	var providersList []domain.Provider
+	if provID == "auto" || provID == "" {
+		providersList = a.providersMgr.GetAll()
+	} else if p, found := a.providersMgr.GetByID(provID); found {
+		providersList = []domain.Provider{p}
+	} else {
+		return "", "", provID, 0
+	}
+
+	results := a.prober.ProbeAllProvidersStream(providersList, []domain.ServiceTarget{target}, nil, nil)
+	a.mu.Lock()
+	a.latestProbes = append(a.latestProbes, results...)
+	a.mu.Unlock()
+
+	var bestIP, provName, resolvedProvID string
+	var minLat int64 = 999999
+
+	for _, r := range results {
+		if r.Target == target && r.IsClean && strings.TrimSpace(r.IP) != "" {
+			if r.LatencyMs < minLat {
+				minLat = r.LatencyMs
+				bestIP = r.IP
+				provName = r.ProviderName
+				resolvedProvID = r.ProviderID
+			}
+		}
+	}
+
+	return bestIP, provName, resolvedProvID, minLat
 }

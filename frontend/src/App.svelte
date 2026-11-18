@@ -1,18 +1,31 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
     GetStatus,
-    ToggleRoute,
-    TestProviders,
     GetProviders,
+    TestProviders,
+    ApplyAutoBest,
+    ApplyRoutes,
+    ClearRoutes,
+    VerifyActive,
+    ToggleProxy,
     AddCustomProvider,
     RemoveCustomProvider
   } from '../wailsjs/go/main/App.js';
+  import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js';
   import { domain } from '../wailsjs/go/models';
   import logoImg from './assets/images/logo-universal.png';
 
-  type Tab = 'connect' | 'servers' | 'settings';
-  let activeTab: Tab = 'connect';
+  type Tab = 'routes' | 'servers' | 'settings';
+  let activeTab: Tab = 'routes';
+
+  const ALL_SERVICES = [
+    { id: 'gemini', name: 'Google Gemini', desc: 'Gemini Web, AI Studio, Generative Language API' },
+    { id: 'claude', name: 'Anthropic Claude', desc: 'Claude AI, Anthropic API, Claude CDN' },
+    { id: 'chatgpt', name: 'OpenAI ChatGPT', desc: 'ChatGPT, OpenAI API, Sora, Auth0' },
+    { id: 'antigravity', name: 'Antigravity IDE', desc: 'CloudCode PA, JetSki WebChannel, AICode' },
+    { id: 'cursor', name: 'Cursor IDE', desc: 'Cursor API, Repo42, Cloudflare Edge' }
+  ];
 
   let status: domain.RouteState = new domain.RouteState({
     is_enabled: false,
@@ -21,32 +34,164 @@
     active_provider: '',
     active_ip: '',
     latency_ms: 0,
-    message: 'Инициализация...'
+    message: 'Инициализация...',
+    routes: {},
+    patched_count: 0,
+    total_count: 5,
+    hosts_path: '',
+    proxy_running: false,
+    proxy_addr: ''
   });
 
-  let selectedTarget: string = 'all';
-  let selectedProviderId: string = 'dns-ai-cf';
   let providers: domain.Provider[] = [];
   let probeResults: domain.ProbeResult[] = [];
-  let isTesting: boolean = false;
-  let isToggling: boolean = false;
+  let probingProviders = new Set<string>();
+
+  let isScanning: boolean = false;
+  let isApplying: boolean = false;
+  let isVerifying: boolean = false;
+  let isTogglingProxy: boolean = false;
   let errorMessage: string = '';
+  let successNotice: string = '';
+
+  // Local selections per service
+  let targetEnabled: Record<string, boolean> = {
+    gemini: true,
+    claude: true,
+    chatgpt: true,
+    antigravity: true,
+    cursor: true
+  };
+
+  let targetProvider: Record<string, string> = {
+    gemini: 'auto',
+    claude: 'auto',
+    chatgpt: 'auto',
+    antigravity: 'auto',
+    cursor: 'auto'
+  };
 
   // Custom provider form
   let newName: string = '';
   let newEndpoint: string = '';
   let newIP: string = '';
 
+  // Svelte 3 reactive computations
+  $: probeMatrix = (() => {
+    const map: Record<string, domain.ProbeResult> = {};
+    for (const r of probeResults) {
+      const key = `${r.provider_id}:${r.target}`;
+      const existing = map[key];
+      if (!existing) {
+        map[key] = r;
+      } else if (r.is_clean && (!existing.is_clean || r.latency_ms < existing.latency_ms)) {
+        map[key] = r;
+      }
+    }
+    return map;
+  })();
+
+  $: bestByProvider = (() => {
+    const map: Record<string, { bestLat: number; cleanCount: number; clean: boolean; reason: string }> = {};
+    for (const p of providers) {
+      let bestLat = 999999;
+      let cleanCount = 0;
+      let reason = '';
+      for (const s of ALL_SERVICES) {
+        const r = probeMatrix[`${p.id}:${s.id}`];
+        if (r && r.is_clean) {
+          cleanCount++;
+          if (r.latency_ms < bestLat) bestLat = r.latency_ms;
+        } else if (r && !r.is_clean && !reason) {
+          reason = r.reason;
+        }
+      }
+      map[p.id] = {
+        bestLat: bestLat === 999999 ? 0 : bestLat,
+        cleanCount,
+        clean: cleanCount > 0,
+        reason: reason || (cleanCount > 0 ? 'Рабочий' : 'Не проверен')
+      };
+    }
+    return map;
+  })();
+
+  $: sortedProviders = [...providers].sort((a, b) => {
+    const sa = bestByProvider[a.id] || { cleanCount: 0, bestLat: 999999 };
+    const sb = bestByProvider[b.id] || { cleanCount: 0, bestLat: 999999 };
+    if (sb.cleanCount !== sa.cleanCount) {
+      return sb.cleanCount - sa.cleanCount;
+    }
+    if (sa.bestLat > 0 && sb.bestLat > 0) {
+      return sa.bestLat - sb.bestLat;
+    }
+    if (sa.bestLat > 0) return -1;
+    if (sb.bestLat > 0) return 1;
+    return 0;
+  });
+
+  $: bestGlobalByService = (() => {
+    const map: Record<string, domain.ProbeResult | undefined> = {};
+    for (const s of ALL_SERVICES) {
+      let best: domain.ProbeResult | undefined = undefined;
+      for (const p of providers) {
+        const r = probeMatrix[`${p.id}:${s.id}`];
+        if (r && r.is_clean) {
+          if (!best || r.latency_ms < best.latency_ms) {
+            best = r;
+          }
+        }
+      }
+      map[s.id] = best;
+    }
+    return map;
+  })();
+
   onMount(async () => {
     await refreshState();
     await loadProviders();
+
+    EventsOn('probe:start', (ids: string[]) => {
+      probingProviders = new Set(ids);
+      isScanning = true;
+    });
+
+    EventsOn('probe:provider', (data: { provider_id: string; results: domain.ProbeResult[] }) => {
+      probingProviders.delete(data.provider_id);
+      probingProviders = new Set(probingProviders);
+
+      const other = probeResults.filter(r => r.provider_id !== data.provider_id);
+      probeResults = [...other, ...data.results];
+    });
+
+    EventsOn('probe:done', (data: { results: domain.ProbeResult[] }) => {
+      probingProviders = new Set();
+      isScanning = false;
+      if (data && data.results) {
+        probeResults = data.results;
+      }
+    });
+  });
+
+  onDestroy(() => {
+    EventsOff('probe:start');
+    EventsOff('probe:provider');
+    EventsOff('probe:done');
   });
 
   async function refreshState() {
     try {
       status = await GetStatus();
-      if (status.active_target) {
-        selectedTarget = status.active_target;
+      if (status.routes) {
+        for (const s of ALL_SERVICES) {
+          const r = status.routes[s.id];
+          if (r) {
+            targetEnabled[s.id] = r.enabled;
+            if (r.provider_id) {
+              targetProvider[s.id] = r.provider_id;
+            }
+          }
+        }
       }
     } catch (err: any) {
       errorMessage = String(err);
@@ -56,48 +201,129 @@
   async function loadProviders() {
     try {
       providers = await GetProviders();
-      if (providers.length > 0 && !providers.some(p => p.id === selectedProviderId)) {
-        selectedProviderId = providers[0].id;
-      }
     } catch (err: any) {
       errorMessage = String(err);
     }
   }
 
-  function getBestProbe(providerId: string): domain.ProbeResult | undefined {
-    const list = probeResults.filter(r => r.provider_id === providerId);
-    if (list.length === 0) return undefined;
-    const cleanList = list.filter(r => r.is_clean);
-    if (cleanList.length > 0) {
-      cleanList.sort((a, b) => (a.latency_ms || 0) - (b.latency_ms || 0));
-      return cleanList[0];
-    }
-    return list[0];
+  function getEnabledTargets(): string[] {
+    return ALL_SERVICES.filter(s => targetEnabled[s.id]).map(s => s.id);
   }
 
-  async function handleToggle() {
-    isToggling = true;
+  async function handleAutoBest() {
+    isApplying = true;
     errorMessage = '';
+    successNotice = '';
     try {
-      const willEnable = !status.is_enabled;
-      status = await ToggleRoute(willEnable, selectedTarget, selectedProviderId);
+      const enabled = getEnabledTargets();
+      if (enabled.length === 0) {
+        errorMessage = 'Включите хотя бы один сервис для маршрутизации';
+        return;
+      }
+      status = await ApplyAutoBest(enabled);
+      successNotice = 'Лучшие шлюзы успешно подобраны и записаны в hosts';
+      setTimeout(() => successNotice = '', 4000);
     } catch (err: any) {
       errorMessage = String(err);
     } finally {
-      isToggling = false;
+      isApplying = false;
+    }
+  }
+
+  async function handleApplyManual() {
+    isApplying = true;
+    errorMessage = '';
+    successNotice = '';
+    try {
+      const enabled = getEnabledTargets();
+      status = await ApplyRoutes(targetProvider, enabled);
+      successNotice = 'Маршруты успешно применены к hosts';
+      setTimeout(() => successNotice = '', 4000);
+    } catch (err: any) {
+      errorMessage = String(err);
+    } finally {
+      isApplying = false;
+    }
+  }
+
+  async function handleClearHosts() {
+    isApplying = true;
+    errorMessage = '';
+    successNotice = '';
+    try {
+      status = await ClearRoutes();
+      successNotice = 'Файл hosts успешно очищен от правил AIRoute';
+      setTimeout(() => successNotice = '', 4000);
+    } catch (err: any) {
+      errorMessage = String(err);
+    } finally {
+      isApplying = false;
+    }
+  }
+
+  async function handleVerifyActive() {
+    isVerifying = true;
+    errorMessage = '';
+    try {
+      const results = await VerifyActive();
+      probeResults = [...probeResults.filter(r => !results.some(v => v.ip === r.ip && v.target === r.target)), ...results];
+      successNotice = 'Проверка активных шлюзов завершена';
+      setTimeout(() => successNotice = '', 3000);
+    } catch (err: any) {
+      errorMessage = String(err);
+    } finally {
+      isVerifying = false;
     }
   }
 
   async function handleTestAll() {
-    isTesting = true;
+    isScanning = true;
     errorMessage = '';
     try {
-      probeResults = await TestProviders(selectedTarget);
+      probeResults = await TestProviders('all');
     } catch (err: any) {
       errorMessage = String(err);
     } finally {
-      isTesting = false;
+      isScanning = false;
     }
+  }
+
+  async function handleApplyProviderToAll(provId: string) {
+    isApplying = true;
+    errorMessage = '';
+    successNotice = '';
+    try {
+      for (const s of ALL_SERVICES) {
+        targetProvider[s.id] = provId;
+      }
+      const enabled = getEnabledTargets();
+      status = await ApplyRoutes(targetProvider, enabled);
+      successNotice = `Все активные сервисы переключены на выбранный DNS`;
+      setTimeout(() => successNotice = '', 4000);
+    } catch (err: any) {
+      errorMessage = String(err);
+    } finally {
+      isApplying = false;
+    }
+  }
+
+  async function handleToggleProxy() {
+    isTogglingProxy = true;
+    errorMessage = '';
+    try {
+      const next = !status.proxy_running;
+      status = await ToggleProxy(next, 2080);
+    } catch (err: any) {
+      errorMessage = String(err);
+    } finally {
+      isTogglingProxy = false;
+    }
+  }
+
+  function copyProxyEnv() {
+    navigator.clipboard.writeText('http://127.0.0.1:2080');
+    successNotice = 'Адрес прокси http://127.0.0.1:2080 скопирован в буфер';
+    setTimeout(() => successNotice = '', 3000);
   }
 
   async function handleAddCustom() {
@@ -136,18 +362,6 @@
       errorMessage = String(err);
     }
   }
-
-  function getTargetLabel(target: string): string {
-    switch (target) {
-      case 'all': return 'Все нейросети (Gemini, Claude, ChatGPT, Antigravity, Cursor)';
-      case 'gemini': return 'Google Gemini & AI Studio';
-      case 'claude': return 'Claude AI & Anthropic';
-      case 'chatgpt': return 'ChatGPT & OpenAI';
-      case 'antigravity': return 'Antigravity IDE (CloudCode)';
-      case 'cursor': return 'Cursor IDE';
-      default: return 'Все нейросети';
-    }
-  }
 </script>
 
 <div class="app-layout">
@@ -157,17 +371,16 @@
       <img class="brand-logo" src={logoImg} alt="AIRoute Logo" />
       <div class="brand-meta">
         <span class="brand-title">AIRoute</span>
-        <span class="brand-badge">PRO</span>
+        <span class="brand-badge">Hosts Patcher</span>
       </div>
     </div>
 
     <nav class="nav-links">
-      <button class="nav-item" class:active={activeTab === 'connect'} on:click={() => activeTab = 'connect'}>
+      <button class="nav-item" class:active={activeTab === 'routes'} on:click={() => activeTab = 'routes'}>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
-          <line x1="12" y1="2" x2="12" y2="12"></line>
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
         </svg>
-        <span>Подключение</span>
+        <span>Маршруты</span>
       </button>
 
       <button class="nav-item" class:active={activeTab === 'servers'} on:click={() => activeTab = 'servers'}>
@@ -177,7 +390,7 @@
           <line x1="6" y1="6" x2="6.01" y2="6"></line>
           <line x1="6" y1="18" x2="6.01" y2="18"></line>
         </svg>
-        <span>Серверы</span>
+        <span>DNS-серверы</span>
         <span class="count-pill">{providers.length}</span>
       </button>
 
@@ -191,7 +404,7 @@
     </nav>
   </header>
 
-  <!-- Notification Bar -->
+  <!-- Notifications -->
   {#if errorMessage}
     <div class="notification-bar error">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
@@ -204,84 +417,203 @@
     </div>
   {/if}
 
-  <!-- Viewport Container -->
-  <main class="view-body">
-    <!-- 1. Connection View (Minimal, Beautiful) -->
-    {#if activeTab === 'connect'}
-      <div class="connect-view">
-        <!-- Power Button -->
-        <div class="power-container">
-          <button
-            class="main-toggle"
-            class:active={status.is_enabled}
-            disabled={isToggling}
-            on:click={handleToggle}
-          >
-            <div class="toggle-glow"></div>
-            <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
-              <line x1="12" y1="2" x2="12" y2="12"></line>
-            </svg>
-            <span class="toggle-state">
-              {#if isToggling}
-                Применение...
-              {:else if status.is_enabled}
-                ПОДКЛЮЧЕНО
-              {:else}
-                ПОДКЛЮЧИТЬ
-              {/if}
-            </span>
-          </button>
-        </div>
+  {#if successNotice}
+    <div class="notification-bar success">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+        <polyline points="22 4 12 14.01 9 11.01"></polyline>
+      </svg>
+      <span>{successNotice}</span>
+      <button class="icon-close" on:click={() => successNotice = ''}>✕</button>
+    </div>
+  {/if}
 
-        <!-- Connection Badge -->
-        <div class="connection-status">
-          <span class="status-dot" class:online={status.is_enabled}></span>
-          <div class="status-text">
-            {#if status.is_enabled}
-              <div class="status-main">Маршрутизация активна через {status.active_provider || 'Smart DNS'}</div>
-              <div class="status-sub">Шлюз: {status.active_ip || 'Активен'}{status.latency_ms > 0 ? ` (${status.latency_ms} мс)` : ''} • Режим: Hosts (Zero-RAM)</div>
-            {:else}
-              <div class="status-main">Прямое подключение к сети</div>
-              <div class="status-sub">Нажмите кнопку выше для мгновенного обхода ограничений</div>
+  <!-- Main Content -->
+  <main class="view-body">
+    <!-- 1. ROUTES TAB (Main smart patcher control) -->
+    {#if activeTab === 'routes'}
+      <div class="routes-view">
+        <!-- Hosts Status Hero Card -->
+        <div class="status-hero">
+          <div class="hero-left">
+            <div class="hero-title-row">
+              <span class="status-indicator" class:active={status.patched_count > 0}></span>
+              <span class="hero-title">
+                {#if status.patched_count > 0}
+                  Пропатчено {status.patched_count} из {status.total_count} сервисов
+                {:else}
+                  Правила не применены — стандартный DNS
+                {/if}
+              </span>
+            </div>
+            <div class="hero-path" title={status.hosts_path}>
+              <span>hosts:</span> {status.hosts_path || 'Определяется...'}
+            </div>
+          </div>
+
+          <div class="hero-actions">
+            <button class="btn-action primary" disabled={isApplying || isScanning} on:click={handleAutoBest}>
+              {#if isApplying}
+                <span class="mini-spinner"></span>
+                <span>Применение...</span>
+              {:else}
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                </svg>
+                <span>Подобрать лучшие и применить</span>
+              {/if}
+            </button>
+
+            <button class="btn-action secondary" disabled={isApplying} on:click={handleApplyManual}>
+              <span>Применить</span>
+            </button>
+
+            {#if status.patched_count > 0}
+              <button class="btn-action secondary" disabled={isVerifying} on:click={handleVerifyActive}>
+                {#if isVerifying}
+                  <span class="mini-spinner"></span>
+                {:else}
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                {/if}
+                <span>Проверить</span>
+              </button>
+
+              <button class="btn-action danger" disabled={isApplying} on:click={handleClearHosts}>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+                <span>Откатить hosts</span>
+              </button>
             {/if}
           </div>
         </div>
 
-        <!-- Scope Card -->
-        <div class="scope-card">
-          <div class="scope-info">
-            <span class="scope-label">Охват сервисов</span>
-            <span class="scope-val">{getTargetLabel(selectedTarget)}</span>
+        <!-- Service Cards Grid -->
+        <div class="service-list">
+          {#each ALL_SERVICES as srv}
+            <div class="service-card" class:disabled={!targetEnabled[srv.id]}>
+              <div class="service-lead">
+                <label class="custom-checkbox">
+                  <input type="checkbox" bind:checked={targetEnabled[srv.id]} />
+                  <span class="checkmark"></span>
+                </label>
+
+                <div class="service-info">
+                  <div class="service-name-row">
+                    <span class="service-name">{srv.name}</span>
+                    {#if status.routes && status.routes[srv.id] && status.routes[srv.id].enabled}
+                      <span class="badge-active">hosts активен</span>
+                    {/if}
+                  </div>
+                  <span class="service-domains">{srv.desc}</span>
+
+                  <!-- Current Applied Info -->
+                  <div class="current-route-info">
+                    {#if status.routes && status.routes[srv.id] && status.routes[srv.id].enabled && status.routes[srv.id].ip}
+                      <span class="route-ip">{status.routes[srv.id].ip}</span>
+                      <span class="sep">•</span>
+                      <span class="route-prov">{status.routes[srv.id].provider_name || 'Smart DNS'}</span>
+                      {#if status.routes[srv.id].latency_ms > 0}
+                        <span class="sep">•</span>
+                        <span class="route-lat">{status.routes[srv.id].latency_ms} ms</span>
+                      {/if}
+                    {:else}
+                      <span class="route-inactive">Маршрутизация выключена (прямое соединение)</span>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+
+              <!-- Provider Selector Dropdown -->
+              <div class="service-selector">
+                <span class="sel-label">Шлюз:</span>
+                <select bind:value={targetProvider[srv.id]} disabled={!targetEnabled[srv.id]}>
+                  <option value="auto">
+                    Авто (лучший: {bestGlobalByService[srv.id]?.provider_name || 'будет подобран'})
+                  </option>
+                  {#each providers as prov}
+                    <option value={prov.id}>
+                      {prov.name}
+                      {#if probeMatrix[`${prov.id}:${srv.id}`]}
+                        {#if probeMatrix[`${prov.id}:${srv.id}`].is_clean}
+                          — {probeMatrix[`${prov.id}:${srv.id}`].latency_ms} ms
+                        {:else}
+                          — недоступен
+                        {/if}
+                      {/if}
+                    </option>
+                  {/each}
+                </select>
+              </div>
+            </div>
+          {/each}
+        </div>
+
+        <!-- Alternative: Local HTTP Proxy Mode Box -->
+        <div class="proxy-banner">
+          <div class="proxy-info">
+            <div class="proxy-header">
+              <span class="proxy-title">Режим локального прокси</span>
+              <span class="tag-noroot">Без прав root / UAC</span>
+            </div>
+            <p class="proxy-desc">
+              Запускает локальный HTTP CONNECT прокси на <code>127.0.0.1:2080</code>. Маршрутизирует запросы нейросетей через чистые шлюзы без изменения файла hosts.
+            </p>
           </div>
-          <button class="scope-btn" on:click={() => activeTab = 'settings'}>
-            Изменить
-          </button>
+
+          <div class="proxy-actions">
+            {#if status.proxy_running}
+              <button class="btn-copy" on:click={copyProxyEnv} title="Скопировать адрес">
+                <span>127.0.0.1:2080</span>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+              </button>
+            {/if}
+
+            <button
+              class="btn-toggle-proxy"
+              class:active={status.proxy_running}
+              disabled={isTogglingProxy}
+              on:click={handleToggleProxy}
+            >
+              {#if isTogglingProxy}
+                <span class="mini-spinner"></span>
+              {:else if status.proxy_running}
+                <span>Остановить прокси</span>
+              {:else}
+                <span>Запустить прокси</span>
+              {/if}
+            </button>
+          </div>
         </div>
       </div>
 
-    <!-- 2. Servers View -->
+    <!-- 2. SERVERS TAB (DNS latency scanner & quick switch) -->
     {:else if activeTab === 'servers'}
       <div class="servers-view">
         <div class="view-toolbar">
           <div class="toolbar-info">
-            <h2>Доступные шлюзы</h2>
-            <p>Пул проверенных Smart DNS и DoH серверов</p>
+            <h2>Доступные DNS-шлюзы</h2>
+            <p>Автоматическая сортировка от лучших к худшим серверам</p>
           </div>
-          <button class="btn-primary" disabled={isTesting} on:click={handleTestAll}>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" class:rotating={isTesting}>
+          <button class="btn-primary" disabled={isScanning} on:click={handleTestAll}>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" class:rotating={isScanning}>
               <polyline points="23 4 23 10 17 10"></polyline>
               <polyline points="1 20 1 14 7 14"></polyline>
               <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
             </svg>
-            <span>{isTesting ? 'Проверка...' : 'Замерить пинг'}</span>
+            <span>{isScanning ? 'Замер пинга...' : 'Замерить пинг всех'}</span>
           </button>
         </div>
 
         <div class="provider-list">
-          {#each providers as prov}
-            {@const res = getBestProbe(prov.id)}
-            <div class="provider-row" class:is-selected={selectedProviderId === prov.id}>
+          {#each sortedProviders as prov}
+            <div class="provider-row">
               <div class="provider-lead">
                 <div class="provider-title">
                   <span class="provider-name">{prov.name}</span>
@@ -291,38 +623,63 @@
                   {/if}
                 </div>
                 <span class="provider-endpoint">{prov.endpoint}</span>
-                {#if prov.fallback_ips && prov.fallback_ips.length > 0}
-                  <span class="provider-ip-hint">IP: {prov.fallback_ips.join(', ')}</span>
-                {/if}
+
+                <!-- Service Badges -->
+                <div class="service-badges">
+                  {#each ALL_SERVICES as s}
+                    <span
+                      class="s-badge"
+                      class:ok={probeMatrix[`${prov.id}:${s.id}`]?.is_clean}
+                      class:fail={probeMatrix[`${prov.id}:${s.id}`] && !probeMatrix[`${prov.id}:${s.id}`]?.is_clean}
+                      class:pending={probingProviders.has(prov.id)}
+                      title={`${s.name}: ${probeMatrix[`${prov.id}:${s.id}`]?.reason || (probingProviders.has(prov.id) ? 'Замер...' : 'Не проверен')}`}
+                    >
+                      {s.id.slice(0, 3).toUpperCase()}: 
+                      {#if probingProviders.has(prov.id)}
+                        ...
+                      {:else if probeMatrix[`${prov.id}:${s.id}`]?.is_clean}
+                        {probeMatrix[`${prov.id}:${s.id}`].latency_ms}ms
+                      {:else if probeMatrix[`${prov.id}:${s.id}`]}
+                        ✗
+                      {:else}
+                        -
+                      {/if}
+                    </span>
+                  {/each}
+                </div>
               </div>
 
               <div class="provider-meta">
-                {#if res}
+                {#if probingProviders.has(prov.id)}
+                  <div class="badge-probing">
+                    <span class="mini-spinner"></span>
+                    <span>Пинг...</span>
+                  </div>
+                {:else if bestByProvider[prov.id] && bestByProvider[prov.id].clean}
                   <span
                     class="latency-badge"
-                    class:fast={res.is_clean && res.latency_ms < 80}
-                    class:med={res.is_clean && res.latency_ms >= 80}
-                    class:bad={!res.is_clean}
-                    title={`${res.ip ? res.ip + ' — ' : ''}${res.reason || ''}`}
+                    class:fast={bestByProvider[prov.id].bestLat < 70}
+                    class:med={bestByProvider[prov.id].bestLat >= 70}
+                    title={`${bestByProvider[prov.id].cleanCount}/5 сервисов работают`}
                   >
-                    {res.is_clean ? `${res.latency_ms} ms` : 'Ошибка'}
+                    {bestByProvider[prov.id].bestLat} ms
+                  </span>
+                {:else if bestByProvider[prov.id] && bestByProvider[prov.id].cleanCount === 0 && probeResults.some(r => r.provider_id === prov.id)}
+                  <span class="latency-badge bad" title={bestByProvider[prov.id].reason}>
+                    Недоступен
                   </span>
                 {/if}
 
                 <button
-                  class="btn-select"
-                  class:active={selectedProviderId === prov.id}
-                  disabled={status.is_enabled}
-                  on:click={() => selectedProviderId = prov.id}
+                  class="btn-apply-all"
+                  disabled={isApplying}
+                  on:click={() => handleApplyProviderToAll(prov.id)}
+                  title="Назначить этот сервер для всех активных сервисов и записать hosts"
                 >
-                  {#if selectedProviderId === prov.id}
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                    <span>Выбран</span>
-                  {:else}
-                    <span>Выбрать</span>
-                  {/if}
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                  <span>Применить ко всем</span>
                 </button>
 
                 {#if prov.is_custom}
@@ -339,46 +696,17 @@
         </div>
       </div>
 
-    <!-- 3. Settings View -->
+    <!-- 3. SETTINGS TAB (Custom servers & info) -->
     {:else if activeTab === 'settings'}
       <div class="settings-view">
         <div class="view-toolbar">
           <div class="toolbar-info">
-            <h2>Параметры маршрутизации</h2>
-            <p>Тонкая настройка работы Smart DNS и шлюзов</p>
+            <h2>Настройки и свои серверы</h2>
+            <p>Управление пользовательскими резолверами и системными параметрами</p>
           </div>
         </div>
 
         <div class="settings-form">
-          <!-- Target scope -->
-          <div class="setting-card">
-            <div class="setting-desc">
-              <span class="setting-title">Целевые сервисы</span>
-              <span class="setting-sub">Выберите, для каких нейросетей перенаправлять запросы</span>
-            </div>
-            <select bind:value={selectedTarget} disabled={status.is_enabled}>
-              <option value="all">Все нейросети (Gemini, Claude, ChatGPT, Antigravity, Cursor)</option>
-              <option value="gemini">Google Gemini & AI Studio</option>
-              <option value="claude">Claude AI & Anthropic</option>
-              <option value="chatgpt">ChatGPT & OpenAI</option>
-              <option value="antigravity">Antigravity IDE (CloudCode)</option>
-              <option value="cursor">Cursor IDE</option>
-            </select>
-          </div>
-
-          <!-- DNS Provider -->
-          <div class="setting-card">
-            <div class="setting-desc">
-              <span class="setting-title">Предпочтительный сервер</span>
-              <span class="setting-sub">Шлюз по умолчанию при включении</span>
-            </div>
-            <select bind:value={selectedProviderId} disabled={status.is_enabled}>
-              {#each providers as prov}
-                <option value={prov.id}>{prov.name}</option>
-              {/each}
-            </select>
-          </div>
-
           <!-- Add Custom Server Section -->
           <div class="setting-card form-box">
             <div class="setting-desc">
@@ -387,9 +715,9 @@
             </div>
 
             <div class="add-grid">
-              <input type="text" placeholder="Название (напр. Мой DoH)" bind:value={newName} />
-              <input type="text" placeholder="Адрес (https://ru.dns-ai.ru/...-&#123;?dns&#125; или IP)" bind:value={newEndpoint} />
-              <input type="text" placeholder="Резервный IP (опционально)" bind:value={newIP} />
+              <input type="text" placeholder="Название (напр. Мой Zapret DoH)" bind:value={newName} />
+              <input type="text" placeholder="Адрес (https://.../dns-query или IP)" bind:value={newEndpoint} />
+              <input type="text" placeholder="IP шлюза (опционально)" bind:value={newIP} />
               <button class="btn-primary" on:click={handleAddCustom}>
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -397,6 +725,18 @@
                 </svg>
                 <span>Добавить</span>
               </button>
+            </div>
+          </div>
+
+          <!-- Architecture Info -->
+          <div class="setting-card info-card">
+            <div class="setting-desc">
+              <span class="setting-title">О модели работы AIRoute</span>
+              <span class="setting-sub">
+                В отличие от традиционных VPN, AIRoute работает по принципу <b>Smart Hosts Patcher</b>.
+                При нажатии «Применить» приложение находит чистые шлюзы и вносит точечные записи в системный файл <code>hosts</code>.
+                После этого приложение не тратит оперативную память и не нагружает процессор (Zero-RAM), а трафик идёт напрямую на максимальной скорости интернет-провайдера.
+              </span>
             </div>
           </div>
         </div>
@@ -453,300 +793,465 @@
   .brand-badge {
     font-size: 10px;
     font-weight: 700;
-    padding: 2px 6px;
-    background-color: var(--primary-glow);
     color: var(--primary);
+    background-color: var(--primary-glow);
+    padding: 2px 7px;
     border-radius: 4px;
-    border: 1px solid rgba(59, 130, 246, 0.3);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
   }
 
   .nav-links {
     display: flex;
     gap: 6px;
     background-color: var(--bg-app);
-    padding: 4px;
-    border-radius: 10px;
+    padding: 3px;
+    border-radius: 8px;
     border: 1px solid var(--border);
   }
 
   .nav-item {
-    padding: 6px 14px;
-    font-size: 13px;
     color: var(--text-secondary);
+    padding: 6px 14px;
     border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    background: transparent;
   }
 
   .nav-item:hover {
     color: var(--text-primary);
+    background-color: var(--bg-surface-hover);
   }
 
   .nav-item.active {
-    background-color: var(--bg-surface);
-    color: var(--primary);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    color: #fff;
+    background-color: var(--primary);
   }
 
   .count-pill {
+    background-color: rgba(255, 255, 255, 0.15);
     font-size: 11px;
-    background: var(--bg-card);
     padding: 1px 6px;
     border-radius: 10px;
-    color: var(--text-muted);
   }
 
   /* Notifications */
   .notification-bar {
-    padding: 10px 20px;
     display: flex;
     align-items: center;
     gap: 10px;
+    padding: 9px 20px;
     font-size: 13px;
+    border-bottom: 1px solid transparent;
   }
 
   .notification-bar.error {
     background-color: var(--danger-bg);
-    color: #fca5a5;
-    border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+    color: var(--danger);
+    border-bottom-color: rgba(239, 68, 68, 0.2);
+  }
+
+  .notification-bar.success {
+    background-color: var(--success-bg);
+    color: var(--success);
+    border-bottom-color: rgba(16, 185, 129, 0.2);
   }
 
   .icon-close {
     margin-left: auto;
     color: inherit;
+    opacity: 0.7;
     font-size: 14px;
   }
+  .icon-close:hover { opacity: 1; }
 
-  /* Body */
+  /* View Body */
   .view-body {
     flex: 1;
     overflow-y: auto;
-    overflow-x: hidden;
-    padding: 24px;
+    padding: 20px 24px;
   }
 
-  /* Connect View */
-  .connect-view {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    max-width: 520px;
-    margin: 20px auto 0;
-    gap: 28px;
-  }
-
-  .power-container {
-    position: relative;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-  }
-
-  .main-toggle {
-    position: relative;
-    width: 210px;
-    height: 210px;
-    border-radius: 50%;
-    background: radial-gradient(circle at 30% 30%, #1e293b, #0f172a);
-    border: 3px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  }
-
-  .main-toggle:hover:not(:disabled) {
-    transform: scale(1.02);
-    border-color: var(--primary);
-  }
-
-  .main-toggle.active {
-    border-color: var(--success);
-    background: radial-gradient(circle at 30% 30%, #064e3b, #022c22);
-    box-shadow: 0 0 50px var(--success-glow);
-  }
-
-  .toggle-icon {
-    width: 44px;
-    height: 44px;
-    color: var(--text-muted);
-    transition: color 0.3s;
-  }
-
-  .main-toggle.active .toggle-icon {
-    color: #34d399;
-  }
-
-  .toggle-state {
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 1px;
-    color: var(--text-secondary);
-  }
-
-  .main-toggle.active .toggle-state {
-    color: #34d399;
-  }
-
-  .connection-status {
-    display: flex;
-    align-items: center;
-    gap: 14px;
+  /* Status Hero */
+  .status-hero {
     background-color: var(--bg-surface);
     border: 1px solid var(--border);
-    padding: 14px 20px;
     border-radius: 12px;
-    width: 100%;
-  }
-
-  .status-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background-color: var(--text-muted);
-    flex-shrink: 0;
-  }
-
-  .status-dot.online {
-    background-color: var(--success);
-    box-shadow: 0 0 10px var(--success);
-  }
-
-  .status-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    text-align: left;
-  }
-
-  .status-main {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .status-sub {
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-
-  .scope-card {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background-color: var(--bg-card);
-    border: 1px solid var(--border);
-    padding: 12px 18px;
-    border-radius: 10px;
-    width: 100%;
-  }
-
-  .scope-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    text-align: left;
-    max-width: 360px;
-  }
-
-  .scope-label {
-    font-size: 11px;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    font-weight: 600;
-  }
-
-  .scope-val {
-    font-size: 13px;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .scope-btn {
-    padding: 6px 14px;
-    font-size: 12px;
-    color: var(--primary);
-    background-color: var(--primary-glow);
-    border: 1px solid rgba(59, 130, 246, 0.3);
-  }
-
-  /* Common Toolbar */
-  .view-toolbar {
+    padding: 16px 20px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 20px;
+    gap: 16px;
   }
 
-  .toolbar-info h2 {
-    font-size: 18px;
-    font-weight: 700;
+  .hero-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     margin-bottom: 4px;
-    text-align: left;
   }
 
-  .toolbar-info p {
-    font-size: 13px;
+  .status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--text-muted);
+  }
+
+  .status-indicator.active {
+    background-color: var(--success);
+    box-shadow: 0 0 10px var(--success-glow);
+  }
+
+  .hero-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .hero-path {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 380px;
+  }
+
+  .hero-path span {
     color: var(--text-secondary);
-    text-align: left;
   }
 
-  .btn-primary {
-    background-color: var(--primary);
-    color: #ffffff;
-    padding: 9px 18px;
+  .hero-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .btn-action {
+    padding: 8px 14px;
     font-size: 13px;
+    border-radius: 8px;
   }
 
-  .btn-primary:hover:not(:disabled) {
-    background-color: var(--primary-hover);
+  .btn-action.primary {
+    background-color: var(--primary);
+    color: #fff;
   }
+  .btn-action.primary:hover { background-color: var(--primary-hover); }
 
-  .rotating {
-    animation: spin 1s linear infinite;
+  .btn-action.secondary {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
   }
+  .btn-action.secondary:hover { background-color: var(--bg-surface-hover); }
 
-  @keyframes spin {
-    100% { transform: rotate(360deg); }
+  .btn-action.danger {
+    background-color: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid rgba(239, 68, 68, 0.2);
   }
+  .btn-action.danger:hover { background-color: rgba(239, 68, 68, 0.2); }
 
-  /* Servers List */
-  .servers-view, .settings-view {
-    max-width: 680px;
-    margin: 0 auto;
-  }
-
-  .provider-list {
+  /* Service Cards */
+  .service-list {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    margin-bottom: 20px;
   }
 
-  .provider-row {
-    background-color: var(--bg-surface);
+  .service-card {
+    background-color: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 14px 18px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    transition: border-color 0.15s ease;
+    gap: 16px;
+    transition: all 0.15s ease;
   }
 
-  .provider-row.is-selected {
+  .service-card.disabled {
+    opacity: 0.65;
+  }
+
+  .service-lead {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    flex: 1;
+  }
+
+  /* Custom Checkbox */
+  .custom-checkbox {
+    position: relative;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    margin-top: 2px;
+  }
+
+  .custom-checkbox input {
+    position: absolute;
+    opacity: 0;
+    cursor: pointer;
+    height: 0;
+    width: 0;
+  }
+
+  .checkmark {
+    width: 18px;
+    height: 18px;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    display: inline-block;
+    transition: all 0.15s ease;
+  }
+
+  .custom-checkbox:hover input ~ .checkmark {
     border-color: var(--primary);
-    background-color: var(--bg-surface-hover);
+  }
+
+  .custom-checkbox input:checked ~ .checkmark {
+    background-color: var(--primary);
+    border-color: var(--primary);
+  }
+
+  .checkmark:after {
+    content: "";
+    position: absolute;
+    display: none;
+  }
+
+  .custom-checkbox input:checked ~ .checkmark:after {
+    display: block;
+    left: 6px;
+    top: 2px;
+    width: 4px;
+    height: 9px;
+    border: solid white;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+
+  .service-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .service-name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .service-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .badge-active {
+    font-size: 10px;
+    font-weight: 600;
+    background-color: var(--success-bg);
+    color: var(--success);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .service-domains {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .current-route-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    margin-top: 3px;
+  }
+
+  .route-ip {
+    color: var(--primary-hover);
+    font-family: monospace;
+    font-weight: 500;
+  }
+
+  .route-prov {
+    color: var(--text-secondary);
+  }
+
+  .route-lat {
+    color: var(--success);
+    font-weight: 500;
+  }
+
+  .route-inactive {
+    color: var(--text-muted);
+    font-style: italic;
+  }
+
+  .sep {
+    color: var(--border);
+  }
+
+  .service-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 250px;
+  }
+
+  .sel-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .service-selector select {
+    flex: 1;
+  }
+
+  /* Proxy Banner */
+  .proxy-banner {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .proxy-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+
+  .proxy-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .tag-noroot {
+    font-size: 10px;
+    font-weight: 700;
+    background-color: rgba(245, 158, 11, 0.15);
+    color: var(--warning);
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+
+  .proxy-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
+  .proxy-desc code {
+    background-color: var(--bg-card);
+    padding: 2px 5px;
+    border-radius: 4px;
+    color: var(--primary-hover);
+    font-size: 11px;
+  }
+
+  .proxy-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .btn-copy {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 8px 12px;
+    font-size: 12px;
+    font-family: monospace;
+    border-radius: 6px;
+  }
+  .btn-copy:hover { border-color: var(--primary); }
+
+  .btn-toggle-proxy {
+    padding: 8px 16px;
+    font-size: 13px;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 8px;
+  }
+
+  .btn-toggle-proxy.active {
+    background-color: var(--success-bg);
+    border-color: var(--success);
+    color: var(--success);
+  }
+
+  /* Toolbar */
+  .view-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  .toolbar-info h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .toolbar-info p {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .btn-primary {
+    background-color: var(--primary);
+    color: #fff;
+    padding: 8px 16px;
+    font-size: 13px;
+  }
+  .btn-primary:hover { background-color: var(--primary-hover); }
+
+  /* Providers List */
+  .provider-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .provider-row {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
   }
 
   .provider-lead {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    text-align: left;
+    flex: 1;
   }
 
   .provider-title {
@@ -758,25 +1263,24 @@
   .provider-name {
     font-size: 14px;
     font-weight: 600;
+    color: var(--text-primary);
   }
 
   .tag-kind {
     font-size: 10px;
     font-weight: 700;
-    padding: 2px 6px;
-    background-color: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 4px;
     color: var(--text-muted);
+    background-color: var(--bg-surface);
+    padding: 2px 6px;
+    border-radius: 4px;
   }
 
   .tag-custom {
     font-size: 10px;
-    font-weight: 600;
+    font-weight: 700;
+    color: var(--warning);
+    background-color: var(--warning-bg);
     padding: 2px 6px;
-    background-color: var(--primary-glow);
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    color: var(--primary);
     border-radius: 4px;
   }
 
@@ -786,22 +1290,62 @@
     font-family: monospace;
   }
 
-  .provider-ip-hint {
-    font-size: 11px;
+  .service-badges {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+
+  .s-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background-color: var(--bg-surface);
     color: var(--text-muted);
+  }
+
+  .s-badge.ok {
+    background-color: var(--success-bg);
+    color: var(--success);
+  }
+
+  .s-badge.fail {
+    background-color: var(--danger-bg);
+    color: var(--danger);
+  }
+
+  .s-badge.pending {
+    background-color: var(--primary-glow);
+    color: var(--primary);
   }
 
   .provider-meta {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
+  }
+
+  .badge-probing {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--primary);
+    background-color: var(--primary-glow);
+    padding: 4px 8px;
+    border-radius: 6px;
   }
 
   .latency-badge {
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
     padding: 4px 8px;
     border-radius: 6px;
+    background-color: var(--bg-surface);
+    color: var(--text-secondary);
   }
 
   .latency-badge.fast {
@@ -819,28 +1363,24 @@
     color: var(--danger);
   }
 
-  .btn-select {
-    padding: 6px 14px;
-    font-size: 12px;
-    background-color: var(--bg-card);
+  .btn-apply-all {
+    background-color: var(--bg-surface);
     border: 1px solid var(--border);
     color: var(--text-primary);
+    padding: 6px 12px;
+    font-size: 12px;
   }
-
-  .btn-select.active {
-    background-color: var(--success-bg);
-    border-color: var(--success);
-    color: var(--success);
+  .btn-apply-all:hover {
+    border-color: var(--primary);
+    background-color: var(--primary-glow);
+    color: var(--primary);
   }
 
   .btn-del {
     color: var(--text-muted);
     padding: 6px;
   }
-
-  .btn-del:hover {
-    color: var(--danger);
-  }
+  .btn-del:hover { color: var(--danger); }
 
   /* Settings Form */
   .settings-form {
@@ -850,39 +1390,44 @@
   }
 
   .setting-card {
-    background-color: var(--bg-surface);
+    background-color: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 18px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    text-align: left;
+    border-radius: 10px;
+    padding: 16px 20px;
   }
 
   .setting-desc {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    margin-bottom: 12px;
   }
 
   .setting-title {
     font-size: 14px;
     font-weight: 600;
+    color: var(--text-primary);
   }
 
   .setting-sub {
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
+    line-height: 1.5;
   }
 
   .add-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1.5fr 1fr auto;
     gap: 10px;
   }
 
-  .add-grid input:first-child {
-    grid-column: span 2;
+  @media (max-width: 680px) {
+    .add-grid {
+      grid-template-columns: 1fr;
+    }
+    .status-hero {
+      flex-direction: column;
+      align-items: flex-start;
+    }
   }
 </style>

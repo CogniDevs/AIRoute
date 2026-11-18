@@ -6,6 +6,22 @@ export function AddCustomProvider(arg1) {
   return window['go']['main']['App']['AddCustomProvider'](arg1);
 }
 
+export function ApplyAutoBest(enabledTargets) {
+  return window['go']['main']['App']['ApplyAutoBest'](enabledTargets);
+}
+
+export function ApplyRoutes(selections, enabledTargets) {
+  return window['go']['main']['App']['ApplyRoutes'](selections, enabledTargets);
+}
+
+export function ClearRoutes() {
+  return window['go']['main']['App']['ClearRoutes']();
+}
+
+export function GetHostsPath() {
+  return window['go']['main']['App']['GetHostsPath']();
+}
+
 export function GetProviders() {
   return window['go']['main']['App']['GetProviders']();
 }
@@ -22,6 +38,14 @@ export function TestProviders(arg1) {
   return window['go']['main']['App']['TestProviders'](arg1);
 }
 
+export function ToggleProxy(enable, port) {
+  return window['go']['main']['App']['ToggleProxy'](enable, port);
+}
+
 export function ToggleRoute(arg1, arg2, arg3) {
   return window['go']['main']['App']['ToggleRoute'](arg1, arg2, arg3);
+}
+
+export function VerifyActive() {
+  return window['go']['main']['App']['VerifyActive']();
 }

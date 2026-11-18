@@ -24,6 +24,7 @@ export namespace domain {
 	        this.target = source["target"];
 	    }
 	}
+
 	export class Provider {
 	    id: string;
 	    name: string;
@@ -50,6 +51,30 @@ export namespace domain {
 	        this.is_custom = source["is_custom"];
 	    }
 	}
+
+	export class ServiceRoute {
+	    target: string;
+	    enabled: boolean;
+	    provider_id: string;
+	    provider_name: string;
+	    ip: string;
+	    latency_ms: number;
+
+	    static createFrom(source: any = {}) {
+	        return new ServiceRoute(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.target = source["target"];
+	        this.enabled = source["enabled"];
+	        this.provider_id = source["provider_id"];
+	        this.provider_name = source["provider_name"];
+	        this.ip = source["ip"];
+	        this.latency_ms = source["latency_ms"];
+	    }
+	}
+
 	export class RouteState {
 	    is_enabled: boolean;
 	    active_mode: string;
@@ -57,9 +82,14 @@ export namespace domain {
 	    active_provider: string;
 	    active_ip: string;
 	    latency_ms: number;
-	    // Go type: time
 	    last_updated: any;
 	    message: string;
+	    routes: { [key: string]: ServiceRoute };
+	    patched_count: number;
+	    total_count: number;
+	    hosts_path: string;
+	    proxy_running: boolean;
+	    proxy_addr: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new RouteState(source);
@@ -73,28 +103,15 @@ export namespace domain {
 	        this.active_provider = source["active_provider"];
 	        this.active_ip = source["active_ip"];
 	        this.latency_ms = source["latency_ms"];
-	        this.last_updated = this.convertValues(source["last_updated"], null);
+	        this.last_updated = source["last_updated"];
 	        this.message = source["message"];
+	        this.routes = source["routes"] || {};
+	        this.patched_count = source["patched_count"] || 0;
+	        this.total_count = source["total_count"] || 0;
+	        this.hosts_path = source["hosts_path"] || '';
+	        this.proxy_running = source["proxy_running"] || false;
+	        this.proxy_addr = source["proxy_addr"] || '';
 	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
 	}
 
 }
-

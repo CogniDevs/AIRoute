@@ -24,8 +24,9 @@ func NewProber(timeout time.Duration) *Prober {
 	return &Prober{Timeout: timeout}
 }
 
-// ProbeIP executes deep validation of a given IP for a specific AI target.
-func (p *Prober) ProbeIP(ip string, target domain.ServiceTarget) domain.ProbeResult {
+// ProbeTargetIP executes deep validation of an IP for a single concrete AI target,
+// precisely measuring its own round-trip time.
+func (p *Prober) ProbeTargetIP(ip string, target domain.ServiceTarget) domain.ProbeResult {
 	res := domain.ProbeResult{
 		IP:     ip,
 		Target: target,
@@ -44,37 +45,74 @@ func (p *Prober) ProbeIP(ip string, target domain.ServiceTarget) domain.ProbeRes
 		res.IsClean, res.Reason = p.checkAntigravity(ip)
 	case domain.TargetCursor:
 		res.IsClean, res.Reason = p.checkCursor(ip)
-	case domain.TargetAll, "":
-		var passed []string
-		if ok, _ := p.checkGemini(ip); ok {
-			passed = append(passed, "Gemini")
-		}
-		if ok, _ := p.checkClaude(ip); ok {
-			passed = append(passed, "Claude")
-		}
-		if ok, _ := p.checkChatGPT(ip); ok {
-			passed = append(passed, "ChatGPT")
-		}
-		if ok, _ := p.checkAntigravity(ip); ok {
-			passed = append(passed, "Antigravity")
-		}
-		if ok, _ := p.checkCursor(ip); ok {
-			passed = append(passed, "Cursor")
-		}
-
-		if len(passed) > 0 {
-			res.IsClean = true
-			res.Reason = fmt.Sprintf("Clean Gateway (%s OK)", strings.Join(passed, ", "))
-		} else {
-			res.IsClean = false
-			res.Reason = "Failed checks for all AI targets"
-		}
 	default:
 		res.IsClean, res.Reason = p.checkGemini(ip)
 	}
 
 	res.LatencyMs = time.Since(start).Milliseconds()
 	return res
+}
+
+// ProbeIPTargets executes parallel checks of a single IP for multiple targets.
+// Returns one ProbeResult per target with individual latency.
+func (p *Prober) ProbeIPTargets(ip string, targets []domain.ServiceTarget) []domain.ProbeResult {
+	if len(targets) == 0 {
+		targets = domain.AllServiceTargets
+	}
+
+	results := make([]domain.ProbeResult, len(targets))
+	var wg sync.WaitGroup
+
+	for i, t := range targets {
+		wg.Add(1)
+		go func(idx int, target domain.ServiceTarget) {
+			defer wg.Done()
+			results[idx] = p.ProbeTargetIP(ip, target)
+		}(i, t)
+	}
+
+	wg.Wait()
+	return results
+}
+
+// ProbeIP validates an IP for the given target. If target is TargetAll or empty,
+// all targets are checked concurrently and a summary ProbeResult is returned.
+func (p *Prober) ProbeIP(ip string, target domain.ServiceTarget) domain.ProbeResult {
+	if target != "" && target != domain.TargetAll {
+		return p.ProbeTargetIP(ip, target)
+	}
+
+	results := p.ProbeIPTargets(ip, domain.AllServiceTargets)
+	var passed []string
+	var minCleanLatency int64 = 999999
+	var bestTarget domain.ServiceTarget = domain.TargetGemini
+
+	for _, r := range results {
+		if r.IsClean {
+			passed = append(passed, string(r.Target))
+			if r.LatencyMs < minCleanLatency {
+				minCleanLatency = r.LatencyMs
+				bestTarget = r.Target
+			}
+		}
+	}
+
+	summary := domain.ProbeResult{
+		IP:        ip,
+		Target:    bestTarget,
+		LatencyMs: minCleanLatency,
+	}
+
+	if len(passed) > 0 {
+		summary.IsClean = true
+		summary.Reason = fmt.Sprintf("Clean Gateway (%s OK)", strings.Join(passed, ", "))
+	} else {
+		summary.IsClean = false
+		summary.LatencyMs = results[0].LatencyMs
+		summary.Reason = "Failed checks for all AI targets"
+	}
+
+	return summary
 }
 
 func (p *Prober) checkGemini(ip string) (bool, string) {
@@ -317,142 +355,181 @@ func (p *Prober) checkCursor(ip string) (bool, string) {
 	return false, "Non-Cursor Gateway"
 }
 
-type providerCandidate struct {
-	ip       string
-	provID   string
-	provName string
-}
-
-// ProbeAllProviders concurrently benchmarks and tests all candidate IPs across registered providers.
-func (p *Prober) ProbeAllProviders(providersList []domain.Provider, target domain.ServiceTarget) []domain.ProbeResult {
-	var domainsToQuery []string
+func getDomainForTarget(target domain.ServiceTarget) string {
 	switch target {
 	case domain.TargetGemini:
-		domainsToQuery = []string{"gemini.google.com"}
+		return "gemini.google.com"
 	case domain.TargetClaude:
-		domainsToQuery = []string{"claude.ai"}
+		return "claude.ai"
 	case domain.TargetChatGPT:
-		domainsToQuery = []string{"chatgpt.com"}
+		return "chatgpt.com"
 	case domain.TargetAntigravity:
-		domainsToQuery = []string{"daily-cloudcode-pa.googleapis.com"}
+		return "daily-cloudcode-pa.googleapis.com"
 	case domain.TargetCursor:
-		domainsToQuery = []string{"cursor.com"}
+		return "cursor.com"
 	default:
-		domainsToQuery = []string{
-			"gemini.google.com",
-			"claude.ai",
-			"chatgpt.com",
-			"daily-cloudcode-pa.googleapis.com",
-			"cursor.com",
-		}
+		return "gemini.google.com"
+	}
+}
+
+// ProbeAllProvidersStream probes each provider concurrently and invokes onProviderDone
+// as soon as each provider finishes benchmarking. Limits global network probe concurrency.
+func (p *Prober) ProbeAllProvidersStream(
+	providersList []domain.Provider,
+	targets []domain.ServiceTarget,
+	onProviderStart func(provID string),
+	onProviderDone func(provID string, results []domain.ProbeResult),
+) []domain.ProbeResult {
+	if len(targets) == 0 {
+		targets = domain.AllServiceTargets
 	}
 
-	var results []domain.ProbeResult
+	var allResults []domain.ProbeResult
 	var mu sync.Mutex
+	var wg sync.WaitGroup
 
-	// Map of provider -> list of candidate IPs
-	type provResolution struct {
-		prov   domain.Provider
-		ips    []string
-		dohErr error
-	}
-
-	resolutionChan := make(chan provResolution, len(providersList))
-	var resWg sync.WaitGroup
+	// Global concurrency limiter for probe socket connections
+	probeSem := make(chan struct{}, 25)
 
 	for _, prov := range providersList {
 		if !prov.Enabled {
 			continue
 		}
-		resWg.Add(1)
+
+		if onProviderStart != nil {
+			onProviderStart(prov.ID)
+		}
+
+		wg.Add(1)
 		go func(pr domain.Provider) {
-			defer resWg.Done()
-			var resolvedIPs []string
+			defer wg.Done()
+
+			var provResults []domain.ProbeResult
+
+			// 1. Resolve domain for each target via DoH / DNS
+			resolvedMap := make(map[domain.ServiceTarget][]string)
 			var lastErr error
 
-			for _, d := range domainsToQuery {
-				ips, err := ResolveViaProvider(pr, d, p.Timeout)
+			for _, t := range targets {
+				testDomain := getDomainForTarget(t)
+				ips, err := ResolveViaProvider(pr, testDomain, p.Timeout)
 				if err != nil {
 					lastErr = err
 				} else {
-					resolvedIPs = append(resolvedIPs, ips...)
+					resolvedMap[t] = ips
 				}
 			}
 
-			resolutionChan <- provResolution{
-				prov:   pr,
-				ips:    resolvedIPs,
-				dohErr: lastErr,
+			// 2. Candidate IPs per provider: deduplicated pool of resolved + Gateways (excluding fallback IPs)
+			poolSet := make(map[string]bool)
+			for _, ips := range resolvedMap {
+				for _, ip := range ips {
+					ip = strings.TrimSpace(ip)
+					if ip != "" {
+						poolSet[ip] = true
+					}
+				}
 			}
+			for _, gw := range pr.Gateways {
+				gw = strings.TrimSpace(gw)
+				if gw != "" {
+					parsed := net.ParseIP(gw)
+					if parsed != nil && !IsFilteredGatewayIP(parsed) {
+						poolSet[gw] = true
+					}
+				}
+			}
+
+			// If no candidates found, emit failure results for targets
+			if len(poolSet) == 0 {
+				reason := "Нет доступных шлюзов"
+				if lastErr != nil {
+					reason = fmt.Sprintf("DoH ошибка: %v", lastErr)
+				}
+				for _, t := range targets {
+					r := domain.ProbeResult{
+						ProviderID:   pr.ID,
+						ProviderName: pr.Name,
+						IP:           "",
+						LatencyMs:    9999,
+						IsClean:      false,
+						Reason:       reason,
+						Target:       t,
+					}
+					provResults = append(provResults, r)
+				}
+			} else {
+				// Probe each candidate IP against relevant targets
+				var pWg sync.WaitGroup
+				var pMu sync.Mutex
+
+				for ip := range poolSet {
+					for _, t := range targets {
+						pWg.Add(1)
+						go func(candIP string, target domain.ServiceTarget) {
+							defer pWg.Done()
+							probeSem <- struct{}{}
+							defer func() { <-probeSem }()
+
+							r := p.ProbeTargetIP(candIP, target)
+							r.ProviderID = pr.ID
+							r.ProviderName = pr.Name
+
+							pMu.Lock()
+							provResults = append(provResults, r)
+							pMu.Unlock()
+						}(ip, t)
+					}
+				}
+				pWg.Wait()
+			}
+
+			if onProviderDone != nil {
+				onProviderDone(pr.ID, provResults)
+			}
+
+			mu.Lock()
+			allResults = append(allResults, provResults...)
+			mu.Unlock()
 		}(prov)
 	}
 
-	resWg.Wait()
-	close(resolutionChan)
+	wg.Wait()
+	return allResults
+}
 
-	var candidates []providerCandidate
-	seenPerProvider := make(map[string]bool) // Key: provID + "|" + ip
-
-	for res := range resolutionChan {
-		pr := res.prov
-		var pool []string
-		pool = append(pool, res.ips...)
-		pool = append(pool, pr.Gateways...) // ONLY Gateways, NEVER FallbackIPs!
-
-		countForProv := 0
-		for _, ip := range pool {
-			ip = strings.TrimSpace(ip)
-			if ip == "" {
-				continue
-			}
-			key := pr.ID + "|" + ip
-			if !seenPerProvider[key] {
-				seenPerProvider[key] = true
-				candidates = append(candidates, providerCandidate{
-					ip:       ip,
-					provID:   pr.ID,
-					provName: pr.Name,
-				})
-				countForProv++
-			}
-		}
-
-		// If no IPs were obtained from DoH or Gateways, report the failure directly
-		if countForProv == 0 {
-			reason := "Нет доступных шлюзов"
-			if res.dohErr != nil {
-				reason = fmt.Sprintf("DoH ошибка: %v", res.dohErr)
-			}
-			results = append(results, domain.ProbeResult{
-				ProviderID:   pr.ID,
-				ProviderName: pr.Name,
-				IP:           "",
-				LatencyMs:    9999,
-				IsClean:      false,
-				Reason:       reason,
-				Target:       target,
-			})
-		}
+// ProbeAllProviders concurrently benchmarks all providers for a target (backward compatibility).
+func (p *Prober) ProbeAllProviders(providersList []domain.Provider, target domain.ServiceTarget) []domain.ProbeResult {
+	var targets []domain.ServiceTarget
+	if target == "" || target == domain.TargetAll {
+		targets = domain.AllServiceTargets
+	} else {
+		targets = []domain.ServiceTarget{target}
 	}
+	return p.ProbeAllProvidersStream(providersList, targets, nil, nil)
+}
 
+// VerifyActiveRoutes quickly tests only the active IPs configured in routes.
+func (p *Prober) VerifyActiveRoutes(routes map[domain.ServiceTarget]domain.ServiceRoute) []domain.ProbeResult {
+	var results []domain.ProbeResult
+	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 20) // Cap concurrency at 20 parallel threads
 
-	for _, cand := range candidates {
+	for t, r := range routes {
+		if !r.Enabled || strings.TrimSpace(r.IP) == "" {
+			continue
+		}
 		wg.Add(1)
-		go func(c providerCandidate) {
+		go func(target domain.ServiceTarget, route domain.ServiceRoute) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			r := p.ProbeIP(c.ip, target)
-			r.ProviderID = c.provID
-			r.ProviderName = c.provName
+			res := p.ProbeTargetIP(route.IP, target)
+			res.ProviderID = route.ProviderID
+			res.ProviderName = route.ProviderName
 
 			mu.Lock()
-			results = append(results, r)
+			results = append(results, res)
 			mu.Unlock()
-		}(cand)
+		}(t, r)
 	}
 
 	wg.Wait()
