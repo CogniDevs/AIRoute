@@ -13,7 +13,8 @@
     UpdateProvider,
     ToggleProvider,
     RemoveCustomProvider,
-    ResetDefaultProviders
+    ResetDefaultProviders,
+    SyncCatalog
   } from '../wailsjs/go/main/App.js';
   import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js';
   import { domain } from '../wailsjs/go/models';
@@ -54,6 +55,7 @@
   let isApplying: boolean = false;
   let isVerifying: boolean = false;
   let isTogglingProxy: boolean = false;
+  let isSyncingCatalog: boolean = false;
   let errorMessage: string = '';
   let successNotice: string = '';
 
@@ -441,6 +443,31 @@
     }
   }
 
+  async function handleSyncCatalog() {
+    isSyncingCatalog = true;
+    errorMessage = '';
+    successNotice = '';
+    try {
+      const count = await SyncCatalog();
+      await loadProviders();
+      successNotice = `Синхронизировано ${count} серверов из онлайн-каталога`;
+      setTimeout(() => successNotice = '', 4000);
+    } catch (err: any) {
+      errorMessage = String(err);
+    } finally {
+      isSyncingCatalog = false;
+    }
+  }
+
+  function copyProviderEndpoint(prov: domain.Provider) {
+    const textToCopy = prov.endpoint || (prov.gateways && prov.gateways[0]) || '';
+    if (textToCopy) {
+      navigator.clipboard.writeText(textToCopy);
+      successNotice = `Адрес "${textToCopy}" скопирован в буфер`;
+      setTimeout(() => successNotice = '', 3000);
+    }
+  }
+
   async function handleAddCustom() {
     if (!newName.trim() || !newEndpoint.trim()) {
       errorMessage = 'Введите название и адрес сервера';
@@ -747,6 +774,19 @@
               <input type="checkbox" bind:checked={hideBrokenServers} />
               <span>Скрыть нерабочие{#if hiddenServersCount > 0} ({hiddenServersCount}){/if}</span>
             </label>
+            <button class="btn-action secondary" disabled={isSyncingCatalog} on:click={handleSyncCatalog} title="Обновить пул серверов из онлайн-каталога dns.quic.best">
+              {#if isSyncingCatalog}
+                <span class="mini-spinner"></span>
+                <span>Обновление...</span>
+              {:else}
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span>Обновить из сети</span>
+              {/if}
+            </button>
             <button class="btn-primary" disabled={isScanning} on:click={handleTestAll}>
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" class:rotating={isScanning}>
                 <polyline points="23 4 23 10 17 10"></polyline>
@@ -847,6 +887,14 @@
                   <span>Применить ко всем</span>
                 </button>
 
+                <!-- Copy Endpoint Button -->
+                <button class="btn-icon" on:click={() => copyProviderEndpoint(prov)} title="Скопировать DoH / IP адрес сервера">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                </button>
+
                 <!-- Edit Server Button -->
                 <button class="btn-icon" on:click={() => openEditModal(prov)} title="Редактировать сервер">
                   <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
@@ -877,9 +925,14 @@
             <h2>Настройки и свои серверы</h2>
             <p>Управление пользовательскими резолверами и системными параметрами</p>
           </div>
-          <button class="btn-action secondary" on:click={handleResetProviders}>
-            <span>Сбросить серверы к стандартным</span>
-          </button>
+          <div class="toolbar-controls">
+            <button class="btn-action secondary" disabled={isSyncingCatalog} on:click={handleSyncCatalog}>
+              <span>Синхронизировать с онлайн-каталогом</span>
+            </button>
+            <button class="btn-action danger" on:click={handleResetProviders}>
+              <span>Сбросить к заводским</span>
+            </button>
+          </div>
         </div>
 
         <div class="settings-form">

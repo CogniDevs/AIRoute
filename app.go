@@ -283,6 +283,11 @@ func (a *App) ResetDefaultProviders() error {
 	return a.providersMgr.Reset()
 }
 
+// SyncCatalog pulls latest online smart DNS servers and updates the local registry.
+func (a *App) SyncCatalog() (int, error) {
+	return a.providersMgr.SyncOnlineCatalog()
+}
+
 // ToggleProxy enables or disables embedded local HTTP CONNECT proxy.
 func (a *App) ToggleProxy(enable bool, port int) (domain.RouteState, error) {
 	if port <= 0 {

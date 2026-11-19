@@ -18,6 +18,8 @@ export function RemoveCustomProvider(arg1:string):Promise<void>;
 
 export function ResetDefaultProviders():Promise<void>;
 
+export function SyncCatalog():Promise<number>;
+
 export function TestProviders(arg1:domain.ServiceTarget):Promise<Array<domain.ProbeResult>>;
 
 export function ToggleProxy(enable:boolean, port:number):Promise<domain.RouteState>;

@@ -156,8 +156,10 @@ func (p *Prober) checkGemini(ip string) (bool, string) {
 	}
 	resp := strings.ToLower(respBuilder.String())
 
-	if strings.Contains(resp, "302") || strings.Contains(resp, "sorry") {
-		return false, "Blocked by Google (Captcha /sorry/index)"
+	if strings.Contains(resp, "302") || strings.Contains(resp, "sorry") ||
+		strings.Contains(resp, "unusual traffic") || strings.Contains(resp, "recaptcha") ||
+		strings.Contains(resp, "429 too many requests") || strings.Contains(resp, "challenge-platform") {
+		return false, "Blocked by Google (Captcha / Unusual Traffic)"
 	}
 	if strings.Contains(resp, "comss.one") || strings.TrimSpace(resp) == "direct" {
 		return false, "Provider Stub (Not a proxy)"
@@ -214,6 +216,11 @@ func (p *Prober) checkClaude(ip string) (bool, string) {
 	if strings.Contains(resp, "app-unavailable-in-region") || strings.Contains(resp, "not available in your country") {
 		return false, "Regional Block (Anthropic)"
 	}
+	if strings.Contains(resp, "just a moment") || strings.Contains(resp, "challenge-platform") ||
+		strings.Contains(resp, "verify you are human") || strings.Contains(resp, "turnstile") ||
+		strings.Contains(resp, "403 forbidden") || strings.Contains(resp, "cf-mitigated") {
+		return false, "Cloudflare Captcha Challenge (Blocked)"
+	}
 	if strings.Contains(resp, "server: cloudflare") || strings.Contains(resp, "cf-ray") {
 		return true, "Clean Claude Cloudflare Gateway"
 	}
@@ -259,6 +266,11 @@ func (p *Prober) checkChatGPT(ip string) (bool, string) {
 	}
 	if strings.Contains(resp, "unable to load site") || strings.Contains(resp, "vpn") || strings.Contains(resp, "not available in your country") {
 		return false, "OpenAI Region/VPN Block"
+	}
+	if strings.Contains(resp, "just a moment") || strings.Contains(resp, "challenge-platform") ||
+		strings.Contains(resp, "verify you are human") || strings.Contains(resp, "turnstile") ||
+		strings.Contains(resp, "403 forbidden") || strings.Contains(resp, "cf-mitigated") {
+		return false, "Cloudflare Captcha Challenge (Blocked)"
 	}
 	if strings.Contains(resp, "chatgpt") || strings.Contains(resp, "oai-did") || strings.Contains(resp, "cf-ray") || strings.Contains(resp, "server: cloudflare") {
 		return true, "Clean ChatGPT Gateway"
@@ -347,6 +359,11 @@ func (p *Prober) checkCursor(ip string) (bool, string) {
 	}
 	if strings.Contains(resp, "not available in your region") || strings.Contains(resp, "app-unavailable-in-region") {
 		return false, "Regional Block (Cursor)"
+	}
+	if strings.Contains(resp, "just a moment") || strings.Contains(resp, "challenge-platform") ||
+		strings.Contains(resp, "verify you are human") || strings.Contains(resp, "turnstile") ||
+		strings.Contains(resp, "403 forbidden") || strings.Contains(resp, "cf-mitigated") {
+		return false, "Cloudflare Captcha Challenge (Blocked)"
 	}
 	if strings.Contains(resp, "server: cloudflare") || strings.Contains(resp, "cf-ray") || strings.Contains(resp, "cursor") {
 		return true, "Clean Cursor Gateway"

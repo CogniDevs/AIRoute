@@ -38,6 +38,10 @@ export function ResetDefaultProviders() {
   return window['go']['main']['App']['ResetDefaultProviders']();
 }
 
+export function SyncCatalog() {
+  return window['go']['main']['App']['SyncCatalog']();
+}
+
 export function TestProviders(arg1) {
   return window['go']['main']['App']['TestProviders'](arg1);
 }
