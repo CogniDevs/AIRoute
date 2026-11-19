@@ -33,7 +33,7 @@ jobs:
       - name: Install Linux GTK & WebKit Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
@@ -43,22 +43,26 @@ jobs:
           cd frontend
           npm ci
 
-      - name: Build Application for Linux
+      - name: Build Application for Linux (WebKit2GTK 4.1)
         run: |
-          wails build -platform linux/amd64
+          wails build -platform linux/amd64 -tags webkit2_41
 
       - name: Package Linux Artifacts (.deb and .tar.gz)
         run: |
           mkdir -p release-dist
 
+          RAW_TAG="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v0.1.0' }}"
+          PKG_VER="${RAW_TAG#v}"
+
           # 1. Archive tar.gz
           mkdir -p package_linux/bin package_linux/share/applications package_linux/share/icons/hicolor/256x256/apps
           cp build/bin/airoute package_linux/bin/airoute
+          chmod 755 package_linux/bin/airoute
           cp build/linux/airoute.desktop package_linux/share/applications/airoute.desktop
           cp build/appicon.png package_linux/share/icons/hicolor/256x256/apps/airoute.png
           tar -czvf release-dist/AIRoute_Linux_amd64.tar.gz -C package_linux .
 
-          # 2. Native Debian/Ubuntu .deb package
+          # 2. Native Debian/Ubuntu .deb package (compatible with Ubuntu 22.04, 24.04, Debian 12+)
           mkdir -p pkg_deb/DEBIAN
           mkdir -p pkg_deb/usr/bin
           mkdir -p pkg_deb/usr/share/applications
@@ -71,19 +75,20 @@ jobs:
 
           cat <<EOF > pkg_deb/DEBIAN/control
           Package: airoute
-          Version: 0.1.0
+          Version: ${PKG_VER}
           Section: net
           Priority: optional
           Architecture: amd64
           Maintainer: CogniDevs <contact@cognidevs.com>
-          Depends: libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
+          Depends: libgtk-3-0 | libgtk-3-0t64, libwebkit2gtk-4.1-0, ca-certificates
           Description: Universal Smart DNS and Hosts Router for AI Models
            AIRoute provides direct zero-overhead access to Google Gemini, Claude AI,
            ChatGPT, Antigravity IDE, and Cursor via Smart DNS and hosts routing.
           EOF
           chmod 644 pkg_deb/DEBIAN/control
 
-          dpkg-deb --build pkg_deb release-dist/AIRoute_0.1.0_amd64.deb
+          dpkg-deb --build pkg_deb "release-dist/AIRoute_${PKG_VER}_amd64.deb"
+          cp "release-dist/AIRoute_${PKG_VER}_amd64.deb" release-dist/AIRoute_Linux_amd64.deb
 
       - name: Upload Linux Artifacts
         uses: actions/upload-artifact@v4

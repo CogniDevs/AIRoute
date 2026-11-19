@@ -34,13 +34,16 @@ Universal Smart DNS and hosts router designed for seamless, zero-overhead connec
 - **Installer**: Download `AIRoute_Windows_Installer.exe` from [Releases](https://github.com/CogniDevs/AIRoute/releases) and run setup.
 - **Portable**: Download and run `AIRoute_Windows_Portable.exe` directly.
 
-### Linux (Ubuntu / Debian / Fedora / Arch)
+### Linux (Ubuntu 22.04+ / Ubuntu 24.04+ / Debian 12+)
 - **Ubuntu / Debian (.deb)**:
   ```bash
-  sudo dpkg -i AIRoute_0.1.0_amd64.deb
+  sudo apt update
+  sudo apt install ./AIRoute_Linux_amd64.deb
   ```
 - **Portable Archive (.tar.gz)**:
   ```bash
+  # Ensure runtime dependencies are installed:
+  sudo apt install -y libgtk-3-0 libwebkit2gtk-4.1-0
   mkdir -p airoute && tar -xzf AIRoute_Linux_amd64.tar.gz -C airoute
   ./airoute/bin/airoute
   ```
@@ -96,13 +99,16 @@ MIT License (c) 2026 CogniDevs.
 - **Установщик**: скачайте `AIRoute_Windows_Installer.exe` из раздела [Releases](https://github.com/CogniDevs/AIRoute/releases) и следуйте указаниям мастера.
 - **Портативная версия**: скачайте и запустите `AIRoute_Windows_Portable.exe` без установки.
 
-### Linux (Ubuntu / Debian / Fedora / Arch)
+### Linux (Ubuntu 22.04+ / Ubuntu 24.04+ / Debian 12+)
 - **Ubuntu / Debian (.deb)**:
   ```bash
-  sudo dpkg -i AIRoute_0.1.0_amd64.deb
+  sudo apt update
+  sudo apt install ./AIRoute_Linux_amd64.deb
   ```
 - **Портативный архив (.tar.gz)**:
   ```bash
+  # Установка рантайм-зависимостей WebKit и GTK:
+  sudo apt install -y libgtk-3-0 libwebkit2gtk-4.1-0
   mkdir -p airoute && tar -xzf AIRoute_Linux_amd64.tar.gz -C airoute
   ./airoute/bin/airoute
   ```
